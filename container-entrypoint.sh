@@ -21,25 +21,84 @@ ensure_pi_package() {
 }
 
 # Claude configs live under CLAUDE_CONFIG_DIR (/root/.claude, host-mounted).
+# Plugin install alone is not enough: must be enabled, and statusline helps
+# confirm activation. Do not also wire SessionStart into settings.json — that
+# would double-fire with the plugin manifest hooks.
 ensure_claude_caveman() {
   if ! command -v claude >/dev/null 2>&1; then
     return
   fi
 
-  mkdir -p "${CLAUDE_CONFIG_DIR:-/root/.claude}"
+  local claude_dir="${CLAUDE_CONFIG_DIR:-/root/.claude}"
+  mkdir -p "$claude_dir"
 
-  if claude plugin list 2>/dev/null | grep -Fq 'caveman@caveman'; then
+  local list
+  list="$(claude plugin list 2>/dev/null || true)"
+
+  if ! printf '%s\n' "$list" | grep -Fq 'caveman@caveman'; then
+    printf 'Installing Claude plugin: caveman@caveman\n'
+    if ! claude plugin marketplace add JuliusBrussee/caveman; then
+      printf 'warning: could not add caveman marketplace\n' >&2
+      return
+    fi
+    if ! claude plugin install caveman@caveman; then
+      printf 'warning: could not install caveman plugin\n' >&2
+      return
+    fi
+    list="$(claude plugin list 2>/dev/null || true)"
+  fi
+
+  # Installed but disabled → enable (entrypoint used to return early here)
+  if printf '%s\n' "$list" | grep -F 'caveman@caveman' | grep -Eqi 'disabled|✘|✗'; then
+    printf 'Enabling Claude plugin: caveman@caveman\n'
+    if ! claude plugin enable caveman@caveman; then
+      printf 'warning: could not enable caveman plugin\n' >&2
+    fi
+  fi
+
+  ensure_claude_caveman_statusline "$claude_dir"
+}
+
+# Pin statusline to the installed plugin cache so the TUI shows [CAVEMAN].
+ensure_claude_caveman_statusline() {
+  local claude_dir="$1"
+  local settings="${claude_dir}/settings.json"
+  local plugin_root=""
+
+  plugin_root="$(
+    find "${claude_dir}/plugins/cache/caveman/caveman" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+      | sort | tail -n 1
+  )"
+  if [[ -z "$plugin_root" || ! -x "${plugin_root}/src/hooks/caveman-statusline.sh" ]]; then
     return
   fi
 
-  printf 'Installing Claude plugin: caveman@caveman\n'
-  if ! claude plugin marketplace add JuliusBrussee/caveman; then
-    printf 'warning: could not add caveman marketplace\n' >&2
+  local sl_cmd="bash \"${plugin_root}/src/hooks/caveman-statusline.sh\""
+  if [[ -f "$settings" ]] && grep -Fq 'caveman-statusline.sh' "$settings" 2>/dev/null; then
     return
   fi
-  if ! claude plugin install caveman@caveman; then
-    printf 'warning: could not install caveman plugin\n' >&2
+
+  printf 'Configuring Claude statusline: caveman\n'
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'warning: python3 missing; skip caveman statusline\n' >&2
+    return
   fi
+
+  CLAUDE_SETTINGS="$settings" CAVEMAN_STATUSLINE_CMD="$sl_cmd" python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+path = Path(os.environ["CLAUDE_SETTINGS"])
+cmd = os.environ["CAVEMAN_STATUSLINE_CMD"]
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text() or "{}")
+    except json.JSONDecodeError:
+        data = {}
+data["statusLine"] = {"type": "command", "command": cmd}
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
 }
 
 ensure_claude_codegraph_mcp() {
