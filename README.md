@@ -71,6 +71,8 @@ Configs/Auth liegen auf dem Host unter `./data/` und überleben Rebuilds:
 
 | Host              | Container            |
 |-------------------|----------------------|
+| `~/.gitconfig`         | `/root/.gitconfig` (read-only) |
+| `~/.ssh/`              | `/root/.ssh` (read-only, GitHub SSH) |
 | `data/cursor/`         | `/root/.cursor`         |
 | `data/cursor-config/`  | `/root/.config/cursor` (Login-Tokens) |
 | `data/pi/`             | `/root/.pi`             |
