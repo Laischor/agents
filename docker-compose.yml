@@ -1,0 +1,29 @@
+services:
+  agents:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agents:local
+    container_name: agents
+    working_dir: ${HOST_PROJECTS}
+    stdin_open: true
+    tty: true
+    environment:
+      # Cursor CLI
+      CURSOR_API_KEY: ${CURSOR_API_KEY:-}
+      # Pi / LLM providers (set what you use)
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    volumes:
+      # Same path as host so compose bind mounts resolve correctly
+      - ${HOST_PROJECTS}:${HOST_PROJECTS}
+      # Control host Docker (project containers)
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persist configs on the host (survive rebuild / down -v)
+      - ./data/cursor:/root/.cursor
+      - ./data/pi:/root/.pi
+      - ./data/claude:/root/.claude
+      - ./data/claude.json:/root/.claude.json
+    # Keep the container running for interactive exec
+    command: ["sleep", "infinity"]
