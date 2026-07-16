@@ -5,18 +5,21 @@ Projekte bleiben auf dem Host; Agents laufen isoliert im Container und steuern D
 
 ## Voraussetzungen
 
-- Docker + Compose
+- macOS
+- Homebrew ([brew.sh](https://brew.sh)) — für automatische Docker/Colima-Installation
 - SSH-Key / Login für die jeweiligen Agent-Accounts (oder API-Keys)
 
 ## Setup
 
 ```bash
-git clone git@github.com:Laischor/agents.git
+git clone https://github.com/Laischor/agents.git
 cd agents
-cp .env.example .env
+./start.sh
 ```
 
-In `.env` anpassen:
+`start.sh` prüft macOS, stellt Docker bereit (installiert bei Bedarf per Homebrew `colima`, `docker`, `docker-compose` und startet Colima) und bringt den Agents-Container hoch.
+
+Danach `.env` anpassen falls noch nicht geschehen:
 
 ```bash
 # Absoluter Pfad zu deinen Projekten (gleicher Pfad im Container)
@@ -26,12 +29,6 @@ CURSOR_API_KEY=
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 GOOGLE_API_KEY=
-```
-
-Image bauen und starten:
-
-```bash
-docker-compose up -d --build
 ```
 
 ### Shell-Aliases
