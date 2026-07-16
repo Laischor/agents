@@ -68,15 +68,16 @@ Configs/Auth liegen auf dem Host unter `./data/` und überleben Rebuilds:
 
 | Host              | Container            |
 |-------------------|----------------------|
-| `data/cursor/`    | `/root/.cursor`      |
-| `data/pi/`        | `/root/.pi`          |
-| `data/claude/`    | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
+| `data/cursor/`         | `/root/.cursor`         |
+| `data/cursor-config/`  | `/root/.config/cursor` (Login-Tokens) |
+| `data/pi/`             | `/root/.pi`             |
+| `data/claude/`         | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
 
 `data/` und `.env` sind gitignored.
 
 ## Docker vom Agent aus
 
-Der Container mountet `/var/run/docker.sock`. Agents können damit Host-Container bauen/starten (`docker compose up`, …), solange sie unter `HOST_PROJECTS` arbeiten — Bind-Mounts in Projekt-Compose-Dateien brauchen denselben Host-Pfad.
+Der Container mountet `${DOCKER_SOCK:-/var/run/docker.sock}`. Agents können damit Host-Container bauen/starten (`docker compose up`, …), solange sie unter `HOST_PROJECTS` arbeiten — Bind-Mounts in Projekt-Compose-Dateien brauchen denselben Host-Pfad.
 
 ## Repo woanders klonen
 

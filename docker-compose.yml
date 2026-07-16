@@ -20,10 +20,11 @@ services:
     volumes:
       # Same path as host so compose bind mounts resolve correctly
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
-      # Control host Docker (project containers)
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       # Persist configs on the host (survive rebuild / down -v)
       - ./data/cursor:/root/.cursor
+      # Cursor CLI stores OAuth tokens here on Linux (not under ~/.cursor)
+      - ./data/cursor-config:/root/.config/cursor
       - ./data/pi:/root/.pi
       - ./data/claude:/root/.claude
     # Keep the container running for interactive exec

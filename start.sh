@@ -69,6 +69,7 @@ ensure_env() {
 ensure_data_dirs() {
   mkdir -p \
     "$AGENTS_DIR/data/cursor" \
+    "$AGENTS_DIR/data/cursor-config" \
     "$AGENTS_DIR/data/pi" \
     "$AGENTS_DIR/data/claude"
   # Legacy empty file mount blocked Claude auth writes — remove if present
