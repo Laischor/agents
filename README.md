@@ -85,8 +85,10 @@ Beim Container-Start registriert der Entrypoint (idempotent):
 | Agent        | Caveman                                      | CodeGraph                                      |
 |--------------|----------------------------------------------|------------------------------------------------|
 | Pi           | `pi-caveman` Package                         | `pi-codegraph` + CLI `codegraph`               |
-| Claude Code  | Plugin `caveman@caveman`                     | MCP `codegraph serve --mcp`                    |
+| Claude Code  | Plugin `caveman@caveman` (Default: **ultra**) | MCP `codegraph serve --mcp`                    |
 | Cursor CLI   | —                                            | MCP in `~/.cursor/mcp.json`                    |
+
+Default-Mode für Claude: `CAVEMAN_DEFAULT_MODE=ultra` in `docker-compose.yml`. Pro Session überschreibbar mit `/caveman lite|full|ultra`.
 
 Pro Projekt einmal indexieren:
 
