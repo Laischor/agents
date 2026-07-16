@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch an agent CLI inside the agents container.
-# Usage: run.sh <agent|pi|claude|cursor-agent|bash> [args...]
+# Usage: run.sh <agent|pi|claude|cursor-agent|codegraph|bash> [args...]
 
 set -euo pipefail
 
@@ -32,15 +32,15 @@ fi
 
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
-  echo "usage: $(basename "$0") <agent|pi|claude|bash> [args...]" >&2
+  echo "usage: $(basename "$0") <agent|pi|claude|codegraph|bash> [args...]" >&2
   exit 1
 fi
 shift
 
 case "$cmd" in
-  agent|cursor-agent|pi|claude|bash) ;;
+  agent|cursor-agent|pi|claude|codegraph|bash) ;;
   *)
-    echo "unknown command: $cmd (expected agent, pi, claude, or bash)" >&2
+    echo "unknown command: $cmd (expected agent, pi, claude, codegraph, or bash)" >&2
     exit 1
     ;;
 esac

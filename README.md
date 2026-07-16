@@ -1,6 +1,7 @@
 # agents
 
 Docker-Umgebung für Coding-Agents: **Cursor CLI**, **Pi** und **Claude Code**.  
+Zusätzlich vorinstalliert: **Caveman** (Token-sparende Antworten) und **CodeGraph** (lokaler Code-Knowledge-Graph / MCP).  
 Projekte bleiben auf dem Host; Agents laufen isoliert im Container und steuern Docker über den Host-Socket.
 
 ## Voraussetzungen
@@ -38,9 +39,10 @@ In `~/.zshrc` (Pfad anpassen, falls das Repo woanders liegt):
 ```bash
 export AGENTS_DIR="${AGENTS_DIR:-$HOME/Documents/projects/agents}"
 agents() { "$AGENTS_DIR/run.sh" "$@"; }
-dagent()  { agents agent "$@"; }
-dpi()     { agents pi "$@"; }
-dclaude() { agents claude "$@"; }
+dagent()     { agents agent "$@"; }
+dpi()        { agents pi "$@"; }
+dclaude()    { agents claude "$@"; }
+dcodegraph() { agents codegraph "$@"; }
 agents-shell() { agents bash "$@"; }
 ```
 
@@ -54,9 +56,10 @@ Aus einem Ordner unter `HOST_PROJECTS`:
 
 ```bash
 cd ~/Documents/projects/mein-projekt
-dagent      # Cursor CLI
-dpi         # Pi
-dclaude     # Claude Code
+dagent       # Cursor CLI
+dpi          # Pi
+dclaude      # Claude Code
+dcodegraph   # CodeGraph CLI
 agents-shell
 ```
 
@@ -74,6 +77,23 @@ Configs/Auth liegen auf dem Host unter `./data/` und überleben Rebuilds:
 | `data/claude/`         | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
 
 `data/` und `.env` sind gitignored.
+
+## Caveman & CodeGraph
+
+Beim Container-Start registriert der Entrypoint (idempotent):
+
+| Agent        | Caveman                                      | CodeGraph                                      |
+|--------------|----------------------------------------------|------------------------------------------------|
+| Pi           | `pi-caveman` Package                         | `pi-codegraph` + CLI `codegraph`               |
+| Claude Code  | Plugin `caveman@caveman`                     | MCP `codegraph serve --mcp`                    |
+| Cursor CLI   | —                                            | MCP in `~/.cursor/mcp.json`                    |
+
+Pro Projekt einmal indexieren:
+
+```bash
+cd ~/Documents/projects/mein-projekt
+dcodegraph init
+```
 
 ## Docker vom Agent aus
 

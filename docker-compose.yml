@@ -17,6 +17,7 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       # Keep Claude auth/config under one mounted dir (survives rebuild)
       CLAUDE_CONFIG_DIR: /root/.claude
+      CODEGRAPH_TELEMETRY: "0"
     volumes:
       # Same path as host so compose bind mounts resolve correctly
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
