@@ -70,8 +70,7 @@ Configs/Auth liegen auf dem Host unter `./data/` und überleben Rebuilds:
 |-------------------|----------------------|
 | `data/cursor/`    | `/root/.cursor`      |
 | `data/pi/`        | `/root/.pi`          |
-| `data/claude/`    | `/root/.claude`      |
-| `data/claude.json`| `/root/.claude.json` |
+| `data/claude/`    | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
 
 `data/` und `.env` sind gitignored.
 

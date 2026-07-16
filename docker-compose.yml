@@ -15,6 +15,8 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # Keep Claude auth/config under one mounted dir (survives rebuild)
+      CLAUDE_CONFIG_DIR: /root/.claude
     volumes:
       # Same path as host so compose bind mounts resolve correctly
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
@@ -24,6 +26,5 @@ services:
       - ./data/cursor:/root/.cursor
       - ./data/pi:/root/.pi
       - ./data/claude:/root/.claude
-      - ./data/claude.json:/root/.claude.json
     # Keep the container running for interactive exec
     command: ["sleep", "infinity"]

@@ -66,8 +66,20 @@ ensure_env() {
   fi
 }
 
+ensure_data_dirs() {
+  mkdir -p \
+    "$AGENTS_DIR/data/cursor" \
+    "$AGENTS_DIR/data/pi" \
+    "$AGENTS_DIR/data/claude"
+  # Legacy empty file mount blocked Claude auth writes — remove if present
+  if [[ -f "$AGENTS_DIR/data/claude.json" ]]; then
+    rm -f "$AGENTS_DIR/data/claude.json"
+  fi
+}
+
 start_agents() {
   ensure_env
+  ensure_data_dirs
 
   if docker compose version >/dev/null 2>&1; then
     COMPOSE=(docker compose -f "$COMPOSE_FILE")
