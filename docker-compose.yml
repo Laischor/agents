@@ -10,6 +10,24 @@ services:
       - ./data/cliproxy/config.yaml:/CLIProxyAPI/config.yaml
       - ./data/cliproxy/auths:/root/.cli-proxy-api
 
+  # Opt-in: set HERMES=1 in .env (compose profile "hermes")
+  hermes:
+    profiles: ["hermes"]
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    ports:
+      - "8642:8642"       # gateway API / health
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    volumes:
+      - ./data/hermes:/opt/data
+      - ${HOST_PROJECTS}:${HOST_PROJECTS}
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+
   agents:
     build:
       context: .

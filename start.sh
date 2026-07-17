@@ -75,6 +75,15 @@ load_env() {
   fi
 }
 
+hermes_enabled() {
+  case "${HERMES:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Opt-in Hermes via compose profile when HERMES=1 in .env
+
 ensure_data_dirs() {
   mkdir -p \
     "$AGENTS_DIR/data/cursor" \
@@ -82,6 +91,9 @@ ensure_data_dirs() {
     "$AGENTS_DIR/data/pi" \
     "$AGENTS_DIR/data/claude" \
     "$AGENTS_DIR/data/cliproxy/auths"
+  if hermes_enabled; then
+    mkdir -p "$AGENTS_DIR/data/hermes"
+  fi
   # Legacy empty file mount blocked Claude auth writes — remove if present
   if [[ -f "$AGENTS_DIR/data/claude.json" ]]; then
     rm -f "$AGENTS_DIR/data/claude.json"
@@ -123,6 +135,7 @@ EOF
 
 start_agents() {
   ensure_env
+  load_env
   ensure_data_dirs
   ensure_cliproxy
 
@@ -132,10 +145,24 @@ start_agents() {
     COMPOSE=(docker-compose -f "$COMPOSE_FILE")
   fi
 
-  log "Starte agents + cli-proxy-api…"
-  "${COMPOSE[@]}" up -d --build
+  if hermes_enabled; then
+    log "Starte agents + cli-proxy-api + hermes…"
+    "${COMPOSE[@]}" --profile hermes up -d --build
+  else
+    log "Starte agents + cli-proxy-api…"
+    # Stop hermes if it was left running from a previous HERMES=1 session
+    if docker ps --format '{{.Names}}' | grep -qx hermes; then
+      log "HERMES=0 — stoppe hermes-Container…"
+      "${COMPOSE[@]}" --profile hermes stop hermes >/dev/null 2>&1 || true
+    fi
+    "${COMPOSE[@]}" up -d --build
+  fi
+
   log "Fertig. Beispiele: dagent | dpi | dclaude | dclaudex | agents-shell"
   log "Claudex OAuth (einmalig): agents cliproxy-login"
+  if hermes_enabled; then
+    log "Hermes: agents hermes-setup (einmalig) | agents hermes"
+  fi
 }
 
 require_macos

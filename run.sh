@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch an agent CLI inside the agents container.
-# Usage: run.sh <agent|pi|claude|claudex|cliproxy-login|cursor-agent|codegraph|bash> [args...]
+# Usage: run.sh <agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|cursor-agent|codegraph|bash> [args...]
 
 set -euo pipefail
 
@@ -29,6 +29,13 @@ else
   echo "docker compose / docker-compose not found" >&2
   exit 1
 fi
+
+hermes_enabled() {
+  case "${HERMES:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 ensure_cliproxy_config() {
   mkdir -p "$AGENTS_DIR/data/cliproxy/auths"
@@ -64,20 +71,25 @@ EOF
 
 ensure_services() {
   ensure_cliproxy_config
-  "${COMPOSE[@]}" up -d --quiet-pull
+  if hermes_enabled; then
+    mkdir -p "$AGENTS_DIR/data/hermes"
+    "${COMPOSE[@]}" --profile hermes up -d --quiet-pull
+  else
+    "${COMPOSE[@]}" up -d --quiet-pull
+  fi
 }
 
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
-  echo "usage: $(basename "$0") <agent|pi|claude|claudex|cliproxy-login|codegraph|bash> [args...]" >&2
+  echo "usage: $(basename "$0") <agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|codegraph|bash> [args...]" >&2
   exit 1
 fi
 shift
 
 case "$cmd" in
-  agent|cursor-agent|pi|claude|claudex|cliproxy-login|codegraph|bash) ;;
+  agent|cursor-agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|codegraph|bash) ;;
   *)
-    echo "unknown command: $cmd (expected agent, pi, claude, claudex, cliproxy-login, codegraph, or bash)" >&2
+    echo "unknown command: $cmd (expected agent, pi, claude, claudex, cliproxy-login, hermes, hermes-setup, codegraph, or bash)" >&2
     exit 1
     ;;
 esac
@@ -113,6 +125,33 @@ if [[ "$cmd" == "claudex" ]]; then
     -e CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=3 \
     -e ENABLE_TOOL_SEARCH=false \
     "$SERVICE" claude --model gpt-5.6-sol "$@"
+fi
+
+# Hermes one-time setup wizard (does not require HERMES=1 / running gateway)
+if [[ "$cmd" == "hermes-setup" ]]; then
+  mkdir -p "$AGENTS_DIR/data/hermes"
+  exec docker run -it --rm \
+    -v "$AGENTS_DIR/data/hermes:/opt/data" \
+    -v "${HOST_PROJECTS}:${HOST_PROJECTS}" \
+    -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+    -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+    -e GOOGLE_API_KEY="${GOOGLE_API_KEY:-}" \
+    -w "$workdir" \
+    nousresearch/hermes-agent:latest setup "$@"
+fi
+
+# Interactive Hermes CLI against the running gateway container
+if [[ "$cmd" == "hermes" ]]; then
+  if ! hermes_enabled; then
+    echo "error: Hermes is disabled — set HERMES=1 in .env and run ./start.sh" >&2
+    exit 1
+  fi
+  ensure_services
+  if ! docker ps --format '{{.Names}}' | grep -qx hermes; then
+    echo "error: hermes container is not running — check HERMES=1 and ./start.sh" >&2
+    exit 1
+  fi
+  exec "${COMPOSE[@]}" --profile hermes exec -it -w "$workdir" hermes hermes "$@"
 fi
 
 # Start container if needed

@@ -1,7 +1,7 @@
 # agents
 
 Docker environment for coding agents: **Cursor CLI**, **Pi**, and **Claude Code**.  
-Also included: **Claudex** (Claude Code + GPT-5.6 Sol via CLIProxyAPI), **Caveman**, and **CodeGraph**.  
+Also included: **Claudex** (Claude Code + GPT-5.6 Sol via CLIProxyAPI), optional **Hermes Agent**, **Caveman**, and **CodeGraph**.  
 Projects stay on the host; agents run isolated in the container and drive Docker through the host socket.
 
 ## Requirements
@@ -32,6 +32,7 @@ ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 GOOGLE_API_KEY=
 CLIPROXY_API_KEY=   # optional — start.sh creates one
+HERMES=0            # set to 1 to start the Hermes Agent container
 ```
 
 ### Shell aliases
@@ -45,6 +46,7 @@ dagent()     { agents agent "$@"; }
 dpi()        { agents pi "$@"; }
 dclaude()    { agents claude "$@"; }
 dclaudex()   { agents claudex "$@"; }
+dhermes()    { agents hermes "$@"; }
 dcodegraph() { agents codegraph "$@"; }
 agents-shell() { agents bash "$@"; }
 ```
@@ -63,11 +65,30 @@ dagent       # Cursor CLI
 dpi          # Pi
 dclaude      # Claude Code (Anthropic)
 dclaudex     # Claude Code harness → GPT-5.6 Sol (Claudex)
+dhermes      # Hermes Agent CLI (requires HERMES=1)
 dcodegraph   # CodeGraph CLI
 agents-shell
 ```
 
 The launcher starts the container if needed and sets the working directory 1:1 to the host path.
+
+## Hermes Agent
+
+Optional [Nous Hermes Agent](https://hermes-agent.nousresearch.com/) gateway (`nousresearch/hermes-agent`). Disabled by default — only starts when `HERMES=1` in `.env` (Compose profile `hermes`).
+
+```bash
+# 1. One-time setup wizard (writes into data/hermes/)
+agents hermes-setup
+
+# 2. Enable and start
+# In .env: HERMES=1
+./start.sh
+
+# 3. Interactive CLI
+dhermes
+```
+
+Gateway API listens on `localhost:8642`. State lives in `data/hermes/` (`/opt/data` in the container). Setting `HERMES=0` and running `./start.sh` again stops a previously running Hermes container.
 
 ## Claudex (GPT-5.6 Sol)
 
@@ -102,6 +123,7 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 | `data/pi/`             | `/root/.pi`             |
 | `data/claude/`         | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
 | `data/cliproxy/`       | CLIProxyAPI config + OAuth (`auths/`) |
+| `data/hermes/`         | Hermes Agent config / sessions (`/opt/data`) |
 
 `data/` and `.env` are gitignored.
 
