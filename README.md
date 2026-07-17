@@ -1,15 +1,15 @@
 # agents
 
-Docker-Umgebung für Coding-Agents: **Cursor CLI**, **Pi** und **Claude Code**.  
-Zusätzlich: **Claudex** (Claude Code + GPT-5.6 Sol via CLIProxyAPI), **Caveman** und **CodeGraph**.  
-Projekte bleiben auf dem Host; Agents laufen isoliert im Container und steuern Docker über den Host-Socket.
+Docker environment for coding agents: **Cursor CLI**, **Pi**, and **Claude Code**.  
+Also included: **Claudex** (Claude Code + GPT-5.6 Sol via CLIProxyAPI), **Caveman**, and **CodeGraph**.  
+Projects stay on the host; agents run isolated in the container and drive Docker through the host socket.
 
-## Voraussetzungen
+## Requirements
 
 - macOS
-- Homebrew ([brew.sh](https://brew.sh)) — für automatische Docker/Colima-Installation
-- SSH-Key / Login für die jeweiligen Agent-Accounts (oder API-Keys)
-- Für Claudex: ChatGPT Plus/Pro mit Codex-Zugang
+- Homebrew ([brew.sh](https://brew.sh)) — for automatic Docker/Colima installation
+- SSH key / login for the respective agent accounts (or API keys)
+- For Claudex: ChatGPT Plus/Pro with Codex access
 
 ## Setup
 
@@ -19,24 +19,24 @@ cd agents
 ./start.sh
 ```
 
-`start.sh` prüft macOS, stellt Docker bereit (installiert bei Bedarf per Homebrew `colima`, `docker`, `docker-compose` und startet Colima) und bringt `agents` + `cli-proxy-api` hoch. Fehlt `CLIPROXY_API_KEY`, wird er generiert und in `.env` sowie `data/cliproxy/config.yaml` geschrieben.
+`start.sh` checks for macOS, prepares Docker (installs `colima`, `docker`, and `docker-compose` via Homebrew if needed and starts Colima), and brings up `agents` + `cli-proxy-api`. If `CLIPROXY_API_KEY` is missing, it is generated and written to `.env` and `data/cliproxy/config.yaml`.
 
-Danach `.env` anpassen falls noch nicht geschehen:
+Then adjust `.env` if you have not already:
 
 ```bash
-# Absoluter Pfad zu deinen Projekten (gleicher Pfad im Container)
+# Absolute path to your projects (same path inside the container)
 HOST_PROJECTS=/Users/YOU/Documents/projects
 
 CURSOR_API_KEY=
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 GOOGLE_API_KEY=
-CLIPROXY_API_KEY=   # optional — start.sh legt einen an
+CLIPROXY_API_KEY=   # optional — start.sh creates one
 ```
 
-### Shell-Aliases
+### Shell aliases
 
-In `~/.zshrc` (Pfad anpassen, falls das Repo woanders liegt):
+In `~/.zshrc` (adjust the path if the repo lives elsewhere):
 
 ```bash
 export AGENTS_DIR="${AGENTS_DIR:-$HOME/Documents/projects/agents}"
@@ -53,83 +53,83 @@ agents-shell() { agents bash "$@"; }
 source ~/.zshrc
 ```
 
-## Nutzung
+## Usage
 
-Aus einem Ordner unter `HOST_PROJECTS`:
+From a directory under `HOST_PROJECTS`:
 
 ```bash
-cd ~/Documents/projects/mein-projekt
+cd ~/Documents/projects/my-project
 dagent       # Cursor CLI
 dpi          # Pi
 dclaude      # Claude Code (Anthropic)
-dclaudex     # Claude Code Harness → GPT-5.6 Sol (Claudex)
+dclaudex     # Claude Code harness → GPT-5.6 Sol (Claudex)
 dcodegraph   # CodeGraph CLI
 agents-shell
 ```
 
-Der Launcher startet den Container bei Bedarf und setzt das Working Directory 1:1 zum Host-Pfad.
+The launcher starts the container if needed and sets the working directory 1:1 to the host path.
 
 ## Claudex (GPT-5.6 Sol)
 
-Claude Code als Harness, Inference über **CLIProxyAPI** → ChatGPT Codex (OAuth). `dclaude` bleibt unverändert auf Anthropic; die Proxy-Env gilt nur für `dclaudex`.
+Claude Code as the harness, inference via **CLIProxyAPI** → ChatGPT Codex (OAuth). `dclaude` stays on Anthropic unchanged; the proxy env applies only to `dclaudex`.
 
-Einmalig ChatGPT/Codex einloggen (öffnet eine URL; Callback auf `localhost:54545`):
+Log in to ChatGPT/Codex once (prints a URL; callback on `localhost:54545`):
 
 ```bash
 agents cliproxy-login
 ```
 
-Danach:
+Then:
 
 ```bash
-cd ~/Documents/projects/mein-projekt
+cd ~/Documents/projects/my-project
 dclaudex
-# In der Session: /status  → Model gpt-5.6-sol, Base-URL Proxy
+# In the session: /status  → model gpt-5.6-sol, base URL proxy
 ```
 
-Hinweis: Subscription-OAuth über einen Dritt-Proxy kann gegen Anbieter-Nutzungsbedingungen verstoßen und birgt Account-/Credential-Risiko. Lokal betreiben, Credentials nicht teilen.
+Note: Routing subscription OAuth through a third-party proxy may violate provider terms and carries account/credential risk. Run it locally and do not share credentials.
 
-## Persistenz
+## Persistence
 
-Configs/Auth liegen auf dem Host unter `./data/` und überleben Rebuilds:
+Configs/auth live on the host under `./data/` and survive rebuilds:
 
 | Host              | Container            |
 |-------------------|----------------------|
 | `~/.gitconfig`         | `/root/.gitconfig` (read-only) |
 | `~/.ssh/`              | `/root/.ssh` (read-only, GitHub SSH) |
 | `data/cursor/`         | `/root/.cursor`         |
-| `data/cursor-config/`  | `/root/.config/cursor` (Login-Tokens) |
+| `data/cursor-config/`  | `/root/.config/cursor` (login tokens) |
 | `data/pi/`             | `/root/.pi`             |
 | `data/claude/`         | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
-| `data/cliproxy/`       | CLIProxyAPI Config + OAuth (`auths/`) |
+| `data/cliproxy/`       | CLIProxyAPI config + OAuth (`auths/`) |
 
-`data/` und `.env` sind gitignored.
+`data/` and `.env` are gitignored.
 
 ## Caveman & CodeGraph
 
-Beim Container-Start registriert der Entrypoint (idempotent):
+On container start the entrypoint registers (idempotent):
 
 | Agent        | Caveman                                      | CodeGraph                                      |
 |--------------|----------------------------------------------|------------------------------------------------|
-| Pi           | `pi-caveman` Package                         | `pi-codegraph` + CLI `codegraph`               |
-| Claude Code  | Plugin `caveman@caveman` (Default: **ultra**) | MCP `codegraph serve --mcp`                    |
+| Pi           | `pi-caveman` package                         | `pi-codegraph` + CLI `codegraph`               |
+| Claude Code  | Plugin `caveman@caveman` (default: **ultra**) | MCP `codegraph serve --mcp`                    |
 | Cursor CLI   | —                                            | MCP in `~/.cursor/mcp.json`                    |
 
-Default-Mode für Claude: `CAVEMAN_DEFAULT_MODE=ultra` in `docker-compose.yml`. Pro Session überschreibbar mit `/caveman lite|full|ultra`.
+Default mode for Claude: `CAVEMAN_DEFAULT_MODE=ultra` in `docker-compose.yml`. Override per session with `/caveman lite|full|ultra`.
 
-Pro Projekt einmal indexieren:
+Index each project once:
 
 ```bash
-cd ~/Documents/projects/mein-projekt
+cd ~/Documents/projects/my-project
 dcodegraph init
 ```
 
-## Docker vom Agent aus
+## Docker from the agent
 
-Der Container mountet `${DOCKER_SOCK:-/var/run/docker.sock}`. Agents können damit Host-Container bauen/starten (`docker compose up`, …), solange sie unter `HOST_PROJECTS` arbeiten — Bind-Mounts in Projekt-Compose-Dateien brauchen denselben Host-Pfad.
+The container mounts `${DOCKER_SOCK:-/var/run/docker.sock}`. Agents can build/start host containers (`docker compose up`, …) as long as they work under `HOST_PROJECTS` — bind mounts in project compose files need the same host path.
 
-## Repo woanders klonen
+## Cloning the repo elsewhere
 
-1. Klonen und `.env` mit lokalem `HOST_PROJECTS` anlegen  
-2. `AGENTS_DIR` auf den neuen Repo-Pfad setzen  
+1. Clone and create `.env` with a local `HOST_PROJECTS`  
+2. Set `AGENTS_DIR` to the new repo path  
 3. `docker-compose up -d --build`
