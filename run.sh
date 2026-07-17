@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch an agent CLI inside the agents container.
-# Usage: run.sh <agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|cursor-agent|codegraph|bash> [args...]
+# Usage: run.sh <agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|cursor-agent|codegraph|clipboard-bridge|bash> [args...]
 
 set -euo pipefail
 
@@ -71,6 +71,7 @@ EOF
 
 ensure_services() {
   ensure_cliproxy_config
+  mkdir -p "$AGENTS_DIR/data/clipboard"
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes"
     "${COMPOSE[@]}" --profile hermes up -d --quiet-pull
@@ -79,20 +80,32 @@ ensure_services() {
   fi
 }
 
+# Host-side: mirror macOS clipboard PNGs into data/clipboard for container stubs.
+ensure_clipboard_bridge() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+  mkdir -p "$AGENTS_DIR/data/clipboard"
+  "$AGENTS_DIR/clipboard-bridge.sh" --daemon
+}
+
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
-  echo "usage: $(basename "$0") <agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|codegraph|bash> [args...]" >&2
+  echo "usage: $(basename "$0") <agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|codegraph|clipboard-bridge|bash> [args...]" >&2
   exit 1
 fi
 shift
 
 case "$cmd" in
-  agent|cursor-agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|codegraph|bash) ;;
+  agent|cursor-agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|codegraph|clipboard-bridge|bash) ;;
   *)
-    echo "unknown command: $cmd (expected agent, pi, claude, claudex, cliproxy-login, hermes, hermes-setup, codegraph, or bash)" >&2
+    echo "unknown command: $cmd (expected agent, pi, claude, claudex, cliproxy-login, hermes, hermes-setup, codegraph, clipboard-bridge, or bash)" >&2
     exit 1
     ;;
 esac
+
+# Host clipboard bridge (not inside the container)
+if [[ "$cmd" == "clipboard-bridge" ]]; then
+  exec "$AGENTS_DIR/clipboard-bridge.sh" "$@"
+fi
 
 # Same-path mount: host cwd under HOST_PROJECTS is identical in container
 if [[ "$PWD" == "$HOST_PROJECTS" || "$PWD" == "$HOST_PROJECTS"/* ]]; then
@@ -116,6 +129,7 @@ if [[ "$cmd" == "claudex" ]]; then
     exit 1
   fi
   ensure_services
+  ensure_clipboard_bridge
   exec "${COMPOSE[@]}" exec -it -w "$workdir" \
     -e ANTHROPIC_BASE_URL=http://cli-proxy-api:8317 \
     -e ANTHROPIC_AUTH_TOKEN="$CLIPROXY_API_KEY" \
@@ -157,6 +171,11 @@ fi
 # Start container if needed
 if ! docker ps --format '{{.Names}}' | grep -qx agents; then
   ensure_services
+fi
+
+# Screenshot paste into Claude needs the host clipboard bridge
+if [[ "$cmd" == "claude" ]]; then
+  ensure_clipboard_bridge
 fi
 
 exec "${COMPOSE[@]}" exec -it -w "$workdir" "$SERVICE" "$cmd" "$@"

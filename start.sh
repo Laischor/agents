@@ -90,6 +90,7 @@ ensure_data_dirs() {
     "$AGENTS_DIR/data/cursor-config" \
     "$AGENTS_DIR/data/pi" \
     "$AGENTS_DIR/data/claude" \
+    "$AGENTS_DIR/data/clipboard" \
     "$AGENTS_DIR/data/cliproxy/auths"
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes"
@@ -160,6 +161,7 @@ start_agents() {
 
   log "Fertig. Beispiele: dagent | dpi | dclaude | dclaudex | agents-shell"
   log "Claudex OAuth (einmalig): agents cliproxy-login"
+  log "Screenshot-Paste in Claude: Bridge startet mit dclaude (Ctrl+V, nicht Cmd+V)"
   if hermes_enabled; then
     log "Hermes: agents hermes-setup (einmalig) | agents hermes"
   fi

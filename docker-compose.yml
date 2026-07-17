@@ -51,6 +51,8 @@ services:
       CODEGRAPH_TELEMETRY: "0"
       # Claude caveman SessionStart default (lite|full|ultra|…)
       CAVEMAN_DEFAULT_MODE: ultra
+      # Host clipboard-bridge.sh → stubs (xclip/wl-paste) for screenshot paste
+      AGENTS_CLIPBOARD_DIR: /var/agents-clipboard
     volumes:
       # Same path as host so compose bind mounts resolve correctly
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
@@ -64,5 +66,7 @@ services:
       - ./data/cursor-config:/root/.config/cursor
       - ./data/pi:/root/.pi
       - ./data/claude:/root/.claude
+      # macOS clipboard bridge drop dir (PNG for Claude Ctrl+V paste)
+      - ./data/clipboard:/var/agents-clipboard
     # Keep the container running for interactive exec
     command: ["sleep", "infinity"]

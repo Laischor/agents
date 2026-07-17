@@ -72,6 +72,16 @@ agents-shell
 
 The launcher starts the container if needed and sets the working directory 1:1 to the host path.
 
+## Screenshot paste (Claude)
+
+Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PNGs into `data/clipboard/`; stubs for `xclip` / `wl-paste` inside the container serve them to Claude Code.
+
+- Starts automatically with `dclaude` / `dclaudex` (or: `agents clipboard-bridge --daemon`)
+- Copy a screenshot to the clipboard, then paste with **Ctrl+V** (not Cmd+V)
+- Status / stop: `agents clipboard-bridge --status` · `agents clipboard-bridge --stop`
+
+Rebuild once after pulling so the stubs and volume mount exist: `./start.sh`
+
 ## Hermes Agent
 
 Optional [Nous Hermes Agent](https://hermes-agent.nousresearch.com/) gateway (`nousresearch/hermes-agent`). Disabled by default — only starts when `HERMES=1` in `.env` (Compose profile `hermes`).
@@ -122,6 +132,7 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 | `data/cursor-config/`  | `/root/.config/cursor` (login tokens) |
 | `data/pi/`             | `/root/.pi`             |
 | `data/claude/`         | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
+| `data/clipboard/`      | `/var/agents-clipboard` (host PNG bridge for Claude paste) |
 | `data/cliproxy/`       | CLIProxyAPI config + OAuth (`auths/`) |
 | `data/hermes/`         | Hermes Agent config / sessions (`/opt/data`) |
 

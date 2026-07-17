@@ -45,6 +45,12 @@ RUN npm install -g @anthropic-ai/claude-code \
 # Ensure PATH survives login shells (bash -l)
 RUN printf '%s\n' 'export PATH="/root/.local/bin:$PATH"' > /etc/profile.d/agents-path.sh
 
+# Fake clipboard tools: host clipboard-bridge.sh writes PNGs here; Claude paste reads them
+ENV AGENTS_CLIPBOARD_DIR=/var/agents-clipboard
+COPY clipboard/xclip clipboard/wl-paste /usr/local/bin/
+RUN chmod +x /usr/local/bin/xclip /usr/local/bin/wl-paste \
+  && mkdir -p /var/agents-clipboard
+
 # Runtime: register Pi packages + Claude/Cursor MCP into mounted config dirs
 COPY container-entrypoint.sh /usr/local/bin/container-entrypoint
 RUN chmod +x /usr/local/bin/container-entrypoint

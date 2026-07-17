@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Minimal xclip stub: serve host-synced PNG for Claude Code image paste.
+# Real clipboard lives on macOS; clipboard-bridge.sh writes AGENTS_CLIPBOARD_DIR/image.png.
+set -u
+
+CLIP_DIR="${AGENTS_CLIPBOARD_DIR:-/var/agents-clipboard}"
+IMG="${CLIP_DIR}/image.png"
+
+has_image() {
+  [[ -f "$IMG" && -s "$IMG" ]]
+}
+
+target=""
+mode="out"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -selection|-s)
+      shift
+      [[ $# -gt 0 ]] && shift
+      ;;
+    -t|-target)
+      shift
+      target="${1:-}"
+      [[ $# -gt 0 ]] && shift
+      ;;
+    -o|-out)
+      mode="out"
+      shift
+      ;;
+    -i|-in)
+      mode="in"
+      shift
+      ;;
+    -display|-d|-loops|-l|-quiet|-silent|-verbose|-noutf8|-filter|-f)
+      # ignore optional flags / their args when present
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [[ "$mode" == "in" ]]; then
+  # Writes into the container are not forwarded to macOS.
+  exit 1
+fi
+
+case "$target" in
+  TARGETS)
+    if has_image; then
+      printf '%s\n' "image/png"
+      exit 0
+    fi
+    exit 1
+    ;;
+  image/png|image/jpeg|image/jpg|image/gif|image/webp|image/bmp)
+    if has_image; then
+      cat "$IMG"
+      exit 0
+    fi
+    exit 1
+    ;;
+  *)
+    exit 1
+    ;;
+esac
