@@ -108,12 +108,19 @@ ensure_claude_codegraph_mcp() {
 
   mkdir -p "${CLAUDE_CONFIG_DIR:-/root/.claude}"
 
-  if claude mcp list 2>/dev/null | grep -Eqi '^codegraph\b'; then
+  # Must be user scope: default `claude mcp add` is local to the entrypoint cwd
+  # (HOST_PROJECTS), so child projects like ~/…/game never saw codegraph.
+  local scope_info=""
+  scope_info="$(claude mcp get codegraph 2>/dev/null || true)"
+  if printf '%s\n' "$scope_info" | grep -Eqi 'Scope:[[:space:]]*User'; then
     return
   fi
 
-  printf 'Configuring Claude MCP: codegraph\n'
-  if ! claude mcp add codegraph -- codegraph serve --mcp; then
+  # Drop stale project-local registration from older entrypoints (ignore errors)
+  claude mcp remove codegraph -s local >/dev/null 2>&1 || true
+
+  printf 'Configuring Claude MCP (user scope): codegraph\n'
+  if ! claude mcp add -s user codegraph -- codegraph serve --mcp; then
     printf 'warning: could not add codegraph MCP to Claude\n' >&2
   fi
 }
