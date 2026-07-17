@@ -1,4 +1,15 @@
 services:
+  cli-proxy-api:
+    image: eceasy/cli-proxy-api:latest
+    container_name: cli-proxy-api
+    restart: unless-stopped
+    ports:
+      - "8317:8317"       # Anthropic-compatible API
+      - "54545:54545"     # Codex / ChatGPT OAuth callback
+    volumes:
+      - ./data/cliproxy/config.yaml:/CLIProxyAPI/config.yaml
+      - ./data/cliproxy/auths:/root/.cli-proxy-api
+
   agents:
     build:
       context: .
@@ -8,6 +19,8 @@ services:
     working_dir: ${HOST_PROJECTS}
     stdin_open: true
     tty: true
+    depends_on:
+      - cli-proxy-api
     environment:
       # Cursor CLI
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}

@@ -1,0 +1,12 @@
+# Minimal CLIProxyAPI config for Claudex (Claude Code → GPT via Codex OAuth).
+# Copied to data/cliproxy/config.yaml by start.sh — do not commit secrets.
+
+host: ""
+port: 8317
+auth-dir: "/root/.cli-proxy-api"
+
+# Bearer token Claude Code sends as ANTHROPIC_AUTH_TOKEN (from CLIPROXY_API_KEY).
+api-keys:
+  - "replace-with-CLIPROXY_API_KEY"
+
+debug: false

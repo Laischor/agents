@@ -1,7 +1,7 @@
 # agents
 
 Docker-Umgebung für Coding-Agents: **Cursor CLI**, **Pi** und **Claude Code**.  
-Zusätzlich vorinstalliert: **Caveman** (Token-sparende Antworten) und **CodeGraph** (lokaler Code-Knowledge-Graph / MCP).  
+Zusätzlich: **Claudex** (Claude Code + GPT-5.6 Sol via CLIProxyAPI), **Caveman** und **CodeGraph**.  
 Projekte bleiben auf dem Host; Agents laufen isoliert im Container und steuern Docker über den Host-Socket.
 
 ## Voraussetzungen
@@ -9,6 +9,7 @@ Projekte bleiben auf dem Host; Agents laufen isoliert im Container und steuern D
 - macOS
 - Homebrew ([brew.sh](https://brew.sh)) — für automatische Docker/Colima-Installation
 - SSH-Key / Login für die jeweiligen Agent-Accounts (oder API-Keys)
+- Für Claudex: ChatGPT Plus/Pro mit Codex-Zugang
 
 ## Setup
 
@@ -18,7 +19,7 @@ cd agents
 ./start.sh
 ```
 
-`start.sh` prüft macOS, stellt Docker bereit (installiert bei Bedarf per Homebrew `colima`, `docker`, `docker-compose` und startet Colima) und bringt den Agents-Container hoch.
+`start.sh` prüft macOS, stellt Docker bereit (installiert bei Bedarf per Homebrew `colima`, `docker`, `docker-compose` und startet Colima) und bringt `agents` + `cli-proxy-api` hoch. Fehlt `CLIPROXY_API_KEY`, wird er generiert und in `.env` sowie `data/cliproxy/config.yaml` geschrieben.
 
 Danach `.env` anpassen falls noch nicht geschehen:
 
@@ -30,6 +31,7 @@ CURSOR_API_KEY=
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 GOOGLE_API_KEY=
+CLIPROXY_API_KEY=   # optional — start.sh legt einen an
 ```
 
 ### Shell-Aliases
@@ -42,6 +44,7 @@ agents() { "$AGENTS_DIR/run.sh" "$@"; }
 dagent()     { agents agent "$@"; }
 dpi()        { agents pi "$@"; }
 dclaude()    { agents claude "$@"; }
+dclaudex()   { agents claudex "$@"; }
 dcodegraph() { agents codegraph "$@"; }
 agents-shell() { agents bash "$@"; }
 ```
@@ -58,12 +61,33 @@ Aus einem Ordner unter `HOST_PROJECTS`:
 cd ~/Documents/projects/mein-projekt
 dagent       # Cursor CLI
 dpi          # Pi
-dclaude      # Claude Code
+dclaude      # Claude Code (Anthropic)
+dclaudex     # Claude Code Harness → GPT-5.6 Sol (Claudex)
 dcodegraph   # CodeGraph CLI
 agents-shell
 ```
 
 Der Launcher startet den Container bei Bedarf und setzt das Working Directory 1:1 zum Host-Pfad.
+
+## Claudex (GPT-5.6 Sol)
+
+Claude Code als Harness, Inference über **CLIProxyAPI** → ChatGPT Codex (OAuth). `dclaude` bleibt unverändert auf Anthropic; die Proxy-Env gilt nur für `dclaudex`.
+
+Einmalig ChatGPT/Codex einloggen (öffnet eine URL; Callback auf `localhost:54545`):
+
+```bash
+agents cliproxy-login
+```
+
+Danach:
+
+```bash
+cd ~/Documents/projects/mein-projekt
+dclaudex
+# In der Session: /status  → Model gpt-5.6-sol, Base-URL Proxy
+```
+
+Hinweis: Subscription-OAuth über einen Dritt-Proxy kann gegen Anbieter-Nutzungsbedingungen verstoßen und birgt Account-/Credential-Risiko. Lokal betreiben, Credentials nicht teilen.
 
 ## Persistenz
 
@@ -77,6 +101,7 @@ Configs/Auth liegen auf dem Host unter `./data/` und überleben Rebuilds:
 | `data/cursor-config/`  | `/root/.config/cursor` (Login-Tokens) |
 | `data/pi/`             | `/root/.pi`             |
 | `data/claude/`         | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
+| `data/cliproxy/`       | CLIProxyAPI Config + OAuth (`auths/`) |
 
 `data/` und `.env` sind gitignored.
 
