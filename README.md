@@ -80,8 +80,6 @@ Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PN
 - Copy a screenshot to the clipboard, then paste with **Ctrl+V** (not Cmd+V)
 - Status / stop: `agents clipboard-bridge --status` · `agents clipboard-bridge --stop`
 
-Rebuild once after pulling so the stubs and volume mount exist: `./start.sh`
-
 ## Hermes Agent
 
 Optional [Nous Hermes Agent](https://hermes-agent.nousresearch.com/) gateway (`nousresearch/hermes-agent`). Disabled by default — only starts when `HERMES=1` in `.env` (Compose profile `hermes`).
