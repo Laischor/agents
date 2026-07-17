@@ -96,7 +96,7 @@ agents hermes-setup
 dhermes
 ```
 
-Gateway API listens on `localhost:8642`. State lives in `data/hermes/` (`/opt/data` in the container). Setting `HERMES=0` and running `./start.sh` again stops a previously running Hermes container.
+Gateway API listens on `localhost:8642`; web dashboard on `localhost:9119` (enabled via `HERMES_DASHBOARD=1` in Compose). Docker requires basic auth — `./start.sh` writes `HERMES_DASHBOARD_USER` / `HERMES_DASHBOARD_PASSWORD` / `HERMES_DASHBOARD_SECRET` into `.env` if missing. State lives in `data/hermes/` (`/opt/data` in the container). Setting `HERMES=0` and running `./start.sh` again stops a previously running Hermes container.
 
 ## Claudex (GPT-5.6 Sol)
 
