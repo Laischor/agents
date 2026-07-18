@@ -100,7 +100,9 @@ Gateway API listens on `localhost:8642`; web dashboard on `localhost:9119` (enab
 
 ### Terminal sandbox (`agents:local`)
 
-Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), and **Pi** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
+Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), **Pi**, and **`claudex`** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
+
+`claudex` is a shim in the image (`/usr/local/bin/claudex`): Claude Code → CLIProxyAPI → GPT-5.6 Sol. It picks `cli-proxy-api:8317` on the Compose network, otherwise `host.docker.internal:8317` (Hermes sandbox). Needs `CLIPROXY_API_KEY` and a logged-in proxy (`agents cliproxy-login`).
 
 ## Claudex (GPT-5.6 Sol)
 
