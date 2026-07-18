@@ -33,6 +33,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}
+      CLIPROXY_API_KEY: ${CLIPROXY_API_KEY:-}
       HOST_PROJECTS: ${HOST_PROJECTS}
       AGENTS_DIR: ${AGENTS_DIR}
       HOST_HOME: ${HOME}
@@ -41,7 +42,7 @@ services:
       TERMINAL_DOCKER_IMAGE: agents:local
       TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "true"
       TERMINAL_CONTAINER_PERSISTENT: "true"
-      TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR"]'
+      TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","CLIPROXY_API_KEY","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR"]'
       TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard"}'
       # Host-absolute bind mounts (compose interpolates before the container sees them)
       TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${HOME}/.gitconfig:/root/.gitconfig:ro","${HOME}/.ssh:/root/.ssh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
@@ -68,6 +69,8 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # Claudex (CLIProxyAPI) — used by /usr/local/bin/claudex
+      CLIPROXY_API_KEY: ${CLIPROXY_API_KEY:-}
       # Keep Claude auth/config under one mounted dir (survives rebuild)
       CLAUDE_CONFIG_DIR: /root/.claude
       CODEGRAPH_TELEMETRY: "0"

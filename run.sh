@@ -139,7 +139,7 @@ if [[ "$cmd" == "cliproxy-login" ]]; then
     /CLIProxyAPI/CLIProxyAPI -no-browser --codex-login "$@"
 fi
 
-# Claude Code harness → GPT-5.6 Sol via CLIProxyAPI
+# Claude Code harness → GPT-5.6 Sol via CLIProxyAPI (/usr/local/bin/claudex in image)
 if [[ "$cmd" == "claudex" ]]; then
   if [[ -z "${CLIPROXY_API_KEY:-}" ]]; then
     echo "error: CLIPROXY_API_KEY missing in .env — run ./start.sh first" >&2
@@ -148,14 +148,8 @@ if [[ "$cmd" == "claudex" ]]; then
   ensure_services
   ensure_clipboard_bridge
   exec "${COMPOSE[@]}" exec -it -w "$workdir" \
-    -e ANTHROPIC_BASE_URL=http://cli-proxy-api:8317 \
-    -e ANTHROPIC_AUTH_TOKEN="$CLIPROXY_API_KEY" \
-    -e ANTHROPIC_API_KEY= \
-    -e CLAUDE_CODE_SUBAGENT_MODEL=gpt-5.6-sol \
-    -e CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1 \
-    -e CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=3 \
-    -e ENABLE_TOOL_SEARCH=false \
-    "$SERVICE" claude --model gpt-5.6-sol "$@"
+    -e CLIPROXY_API_KEY="$CLIPROXY_API_KEY" \
+    "$SERVICE" claudex "$@"
 fi
 
 # Hermes one-time setup wizard (does not require HERMES=1 / running gateway)
