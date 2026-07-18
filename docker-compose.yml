@@ -11,11 +11,15 @@ services:
       - ./data/cliproxy/auths:/root/.cli-proxy-api
 
   # Opt-in: set HERMES=1 in .env (compose profile "hermes")
+  # Terminal backend = docker → agents:local (claude / agent / pi available there).
+  # AGENTS_DIR must be absolute in .env (start.sh / run.sh write it automatically).
   hermes:
     profiles: ["hermes"]
     image: nousresearch/hermes-agent:latest
     container_name: hermes
     restart: unless-stopped
+    depends_on:
+      - agents
     command: ["gateway", "run"]
     ports:
       - "127.0.0.1:8642:8642"     # gateway API / health
@@ -28,6 +32,19 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      CURSOR_API_KEY: ${CURSOR_API_KEY:-}
+      HOST_PROJECTS: ${HOST_PROJECTS}
+      AGENTS_DIR: ${AGENTS_DIR}
+      HOST_HOME: ${HOME}
+      # Drive host Docker from inside hermes (sandbox = agents:local)
+      TERMINAL_ENV: docker
+      TERMINAL_DOCKER_IMAGE: agents:local
+      TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "true"
+      TERMINAL_CONTAINER_PERSISTENT: "true"
+      TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR"]'
+      TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard"}'
+      # Host-absolute bind mounts (compose interpolates before the container sees them)
+      TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${HOME}/.gitconfig:/root/.gitconfig:ro","${HOME}/.ssh:/root/.ssh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
     volumes:
       - ./data/hermes:/opt/data
       - ${HOST_PROJECTS}:${HOST_PROJECTS}

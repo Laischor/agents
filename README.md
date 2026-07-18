@@ -98,6 +98,10 @@ dhermes
 
 Gateway API listens on `localhost:8642`; web dashboard on `localhost:9119` (enabled via `HERMES_DASHBOARD=1` in Compose). Docker requires basic auth — `./start.sh` writes `HERMES_DASHBOARD_USER` / `HERMES_DASHBOARD_PASSWORD` / `HERMES_DASHBOARD_SECRET` into `.env` if missing. State lives in `data/hermes/` (`/opt/data` in the container). Setting `HERMES=0` and running `./start.sh` again stops a previously running Hermes container.
 
+### Terminal sandbox (`agents:local`)
+
+Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), and **Pi** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
+
 ## Claudex (GPT-5.6 Sol)
 
 Claude Code as the harness, inference via **CLIProxyAPI** → ChatGPT Codex (OAuth). `dclaude` stays on Anthropic unchanged; the proxy env applies only to `dclaudex`.

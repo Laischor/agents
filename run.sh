@@ -8,6 +8,21 @@ AGENTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_FILE="$AGENTS_DIR/docker-compose.yml"
 SERVICE="agents"
 
+# Keep AGENTS_DIR in .env so compose can interpolate Hermes docker_volumes
+if [[ -f "$AGENTS_DIR/.env" ]]; then
+  if grep -q '^AGENTS_DIR=' "$AGENTS_DIR/.env" 2>/dev/null; then
+    tmp="$(mktemp)"
+    sed "s|^AGENTS_DIR=.*|AGENTS_DIR=$AGENTS_DIR|" "$AGENTS_DIR/.env" > "$tmp"
+    mv "$tmp" "$AGENTS_DIR/.env"
+  else
+    {
+      printf '\n'
+      printf '# Absolute path to this repo (Hermes sandbox bind mounts)\n'
+      printf 'AGENTS_DIR=%s\n' "$AGENTS_DIR"
+    } >> "$AGENTS_DIR/.env"
+  fi
+fi
+
 # Load local .env (HOST_PROJECTS, API keys for compose)
 if [[ -f "$AGENTS_DIR/.env" ]]; then
   set -a
@@ -15,6 +30,8 @@ if [[ -f "$AGENTS_DIR/.env" ]]; then
   source "$AGENTS_DIR/.env"
   set +a
 fi
+# Script path wins over a stale .env value
+export AGENTS_DIR
 
 # Projects root on the host (== path inside container)
 HOST_PROJECTS="${HOST_PROJECTS:-$HOME/Documents/projects}"

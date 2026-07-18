@@ -25,9 +25,16 @@ COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins /usr/local/libexec/docker/cli-plugins
 
 # Cursor CLI (provides `agent` / `cursor-agent`)
+# Install under /usr/local — Hermes docker backend overlays /root with a
+# sandbox volume/tmpfs, which would hide ~/.local and break symlink targets.
 RUN curl https://cursor.com/install -fsS | bash \
-  && ln -sf /root/.local/bin/agent /usr/local/bin/agent \
-  && ln -sf /root/.local/bin/cursor-agent /usr/local/bin/cursor-agent \
+  && mkdir -p /usr/local/lib \
+  && rm -rf /usr/local/lib/cursor-agent \
+  && cp -a /root/.local/share/cursor-agent /usr/local/lib/cursor-agent \
+  && CURSOR_BIN="$(find /usr/local/lib/cursor-agent/versions -maxdepth 2 -type f -name cursor-agent | sort | tail -1)" \
+  && test -n "$CURSOR_BIN" \
+  && ln -sf "$CURSOR_BIN" /usr/local/bin/agent \
+  && ln -sf "$CURSOR_BIN" /usr/local/bin/cursor-agent \
   && agent --version
 
 # Pi coding agent

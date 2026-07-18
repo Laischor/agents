@@ -66,6 +66,24 @@ ensure_env() {
   fi
 }
 
+# Absolute repo path for compose ${AGENTS_DIR} (Hermes docker_volumes → data/*).
+ensure_agents_dir_env() {
+  local env_file="$AGENTS_DIR/.env"
+  if grep -q '^AGENTS_DIR=' "$env_file" 2>/dev/null; then
+    local tmp
+    tmp="$(mktemp)"
+    sed "s|^AGENTS_DIR=.*|AGENTS_DIR=$AGENTS_DIR|" "$env_file" > "$tmp"
+    mv "$tmp" "$env_file"
+  else
+    {
+      printf '\n'
+      printf '# Absolute path to this repo (Hermes sandbox bind mounts)\n'
+      printf 'AGENTS_DIR=%s\n' "$AGENTS_DIR"
+    } >> "$env_file"
+    log "AGENTS_DIR in .env geschrieben."
+  fi
+}
+
 load_env() {
   if [[ -f "$AGENTS_DIR/.env" ]]; then
     set -a
@@ -166,6 +184,7 @@ ensure_hermes_dashboard_auth() {
 
 start_agents() {
   ensure_env
+  ensure_agents_dir_env
   load_env
   ensure_data_dirs
   ensure_cliproxy
