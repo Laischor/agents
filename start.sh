@@ -45,7 +45,7 @@ ensure_docker_stack() {
 
   if ! colima status 2>/dev/null | grep -qi 'Running'; then
     log "Starte Colima…"
-    colima start
+    colima start -m 4 -c 4
   else
     log "Colima läuft bereits."
   fi
