@@ -78,6 +78,8 @@ On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/
 
 `./start.sh` and `run.sh` call `gh auth token` on the host and pass the result as `GH_TOKEN` into the container (and Hermes sandbox). Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
 
+macOS `~/.gitconfig` often hardcodes Homebrew’s credential helper (`!/opt/homebrew/bin/gh auth git-credential`). The image ships a symlink `/opt/homebrew/bin/gh` → `/usr/bin/gh` so HTTPS git auth still works when that config is bind-mounted.
+
 ## Screenshot paste (Claude)
 
 Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PNGs into `data/clipboard/`; stubs for `xclip` / `wl-paste` inside the container serve them to Claude Code.
