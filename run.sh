@@ -33,6 +33,13 @@ fi
 # Script path wins over a stale .env value
 export AGENTS_DIR
 
+# macOS: gh OAuth lives in Keychain, not in ~/.config/gh — inject for compose.
+if [[ -z "${GH_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
+  if token="$(gh auth token 2>/dev/null)" && [[ -n "$token" ]]; then
+    export GH_TOKEN="$token"
+  fi
+fi
+
 # Projects root on the host (== path inside container)
 HOST_PROJECTS="${HOST_PROJECTS:-$HOME/Documents/projects}"
 HOST_PROJECTS="${HOST_PROJECTS/#\~/$HOME}"

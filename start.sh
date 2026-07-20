@@ -113,9 +113,34 @@ ensure_data_dirs() {
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes"
   fi
+  # Host gh config mount — ensure dir exists so Docker does not create a file
+  if [[ ! -d "${HOME}/.config/gh" ]]; then
+    mkdir -p "${HOME}/.config/gh"
+    log "Hinweis: ~/.config/gh war leer — auf dem Host 'gh auth login' ausführen."
+  fi
   # Legacy empty file mount blocked Claude auth writes — remove if present
   if [[ -f "$AGENTS_DIR/data/claude.json" ]]; then
     rm -f "$AGENTS_DIR/data/claude.json"
+  fi
+}
+
+# macOS Keychain holds the gh OAuth token; ~/.config/gh has no oauth_token.
+# Export GH_TOKEN so compose can inject it into the Linux container.
+ensure_gh_token() {
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    export GH_TOKEN
+    return
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    log "Hinweis: gh fehlt auf dem Host — Container bekommt keinen GH_TOKEN (Keychain)."
+    return
+  fi
+  local token
+  if token="$(gh auth token 2>/dev/null)" && [[ -n "$token" ]]; then
+    export GH_TOKEN="$token"
+    log "GH_TOKEN aus Host-Keychain (gh auth token) für den Container gesetzt."
+  else
+    log "Hinweis: gh nicht eingeloggt — 'gh auth login' auf dem Host, oder GH_TOKEN in .env."
   fi
 }
 
@@ -187,9 +212,12 @@ start_agents() {
   ensure_agents_dir_env
   load_env
   ensure_data_dirs
+  ensure_gh_token
   ensure_cliproxy
   ensure_hermes_dashboard_auth
   load_env
+  # Re-apply after load_env in case .env left GH_TOKEN empty
+  ensure_gh_token
 
   if docker compose version >/dev/null 2>&1; then
     COMPOSE=(docker compose -f "$COMPOSE_FILE")

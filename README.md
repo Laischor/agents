@@ -72,6 +72,12 @@ agents-shell
 
 The launcher starts the container if needed and sets the working directory 1:1 to the host path.
 
+## GitHub CLI (`gh`)
+
+On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/.config/gh/hosts.yml`. Mounting that directory alone is not enough for the Linux container.
+
+`./start.sh` and `run.sh` call `gh auth token` on the host and pass the result as `GH_TOKEN` into the container (and Hermes sandbox). Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
+
 ## Screenshot paste (Claude)
 
 Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PNGs into `data/clipboard/`; stubs for `xclip` / `wl-paste` inside the container serve them to Claude Code.
@@ -100,7 +106,7 @@ Gateway API listens on `localhost:8642`; web dashboard on `localhost:9119` (enab
 
 ### Terminal sandbox (`agents:local`)
 
-Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), **Pi**, and **`claudex`** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
+Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), **Pi**, **`claudex`**, and **`gh`** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, `~/.config/gh`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
 
 `claudex` is a shim in the image (`/usr/local/bin/claudex`): Claude Code → CLIProxyAPI → GPT-5.6 Sol. It picks `cli-proxy-api:8317` on the Compose network, otherwise `host.docker.internal:8317` (Hermes sandbox). Needs `CLIPROXY_API_KEY` and a logged-in proxy (`agents cliproxy-login`).
 
@@ -132,6 +138,7 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 |-------------------|----------------------|
 | `~/.gitconfig`         | `/root/.gitconfig` (read-only) |
 | `~/.ssh/`              | `/root/.ssh` (read-only, GitHub SSH) |
+| `~/.config/gh/`        | `/root/.config/gh` (read-only; config only — token via `GH_TOKEN`) |
 | `data/cursor/`         | `/root/.cursor`         |
 | `data/cursor-config/`  | `/root/.config/cursor` (login tokens) |
 | `data/pi/`             | `/root/.pi`             |

@@ -20,6 +20,18 @@ RUN apt-get update \
     wget \
   && rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI (official apt repo — Debian packages are outdated/broken)
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+  && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+  && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends gh \
+  && rm -rf /var/lib/apt/lists/* \
+  && gh --version
+
 # Docker CLI + Compose plugin (talks to host daemon via mounted socket)
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins /usr/local/libexec/docker/cli-plugins
