@@ -20,6 +20,7 @@ services:
     restart: unless-stopped
     depends_on:
       - agents
+      - searxng
     command: ["gateway", "run"]
     ports:
       - "127.0.0.1:8642:8642"     # gateway API / health
@@ -34,6 +35,8 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}
       CLIPROXY_API_KEY: ${CLIPROXY_API_KEY:-}
+      # Compose-network URL — Hermes web_search backend (search_backend: searxng)
+      SEARXNG_URL: http://searxng:8080
       # macOS: gh stores OAuth in Keychain — start.sh/run.sh inject via `gh auth token`
       GH_TOKEN: ${GH_TOKEN:-}
       HOST_PROJECTS: ${HOST_PROJECTS}
@@ -52,6 +55,27 @@ services:
       - ./data/hermes:/opt/data
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+
+  # Metasearch for Hermes web_search — JSON enabled via config/searxng/settings.yml.
+  # Same compose profile as hermes (HERMES=1 / --profile hermes).
+  searxng:
+    profiles: ["hermes"]
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"   # host curl / browser smoke-test
+    volumes:
+      - ./config/searxng:/etc/searxng:rw
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
 
   agents:
     build:
