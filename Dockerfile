@@ -11,14 +11,38 @@ RUN apt-get update \
     bash \
     ca-certificates \
     curl \
+    fd-find \
     git \
+    jq \
     ripgrep \
     python3 \
     python3-pip \
+    sqlite3 \
     sudo \
     unzip \
     wget \
+  && ln -sf "$(command -v fdfind)" /usr/local/bin/fd \
   && rm -rf /var/lib/apt/lists/*
+
+# yq (mikefarah) + ast-grep — GitHub release binaries
+ARG YQ_VERSION=v4.53.3
+ARG AST_GREP_VERSION=0.44.1
+RUN arch="$(dpkg --print-architecture)" \
+  && case "$arch" in \
+       amd64) yq_arch=amd64; sg_arch=x86_64 ;; \
+       arm64) yq_arch=arm64; sg_arch=aarch64 ;; \
+       *) echo "unsupported arch: $arch"; exit 1 ;; \
+     esac \
+  && wget -qO /usr/local/bin/yq \
+       "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${yq_arch}" \
+  && chmod +x /usr/local/bin/yq \
+  && wget -qO /tmp/ast-grep.zip \
+       "https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VERSION}/app-${sg_arch}-unknown-linux-gnu.zip" \
+  && unzip -qo /tmp/ast-grep.zip -d /usr/local/bin \
+  && chmod +x /usr/local/bin/ast-grep /usr/local/bin/sg \
+  && rm -f /tmp/ast-grep.zip \
+  && yq --version \
+  && ast-grep --version
 
 # GitHub CLI (official apt repo — Debian packages are outdated/broken)
 RUN mkdir -p -m 755 /etc/apt/keyrings \
@@ -74,8 +98,10 @@ RUN printf '%s\n' 'export PATH="/root/.local/bin:$PATH"' > /etc/profile.d/agents
 ENV AGENTS_CLIPBOARD_DIR=/var/agents-clipboard
 COPY clipboard/xclip clipboard/wl-paste /usr/local/bin/
 COPY bin/claudex /usr/local/bin/claudex
+COPY bin/agents-janitor.sh /usr/local/bin/agents-janitor
 RUN chmod +x /usr/local/bin/xclip /usr/local/bin/wl-paste /usr/local/bin/claudex \
-  && mkdir -p /var/agents-clipboard
+      /usr/local/bin/agents-janitor \
+  && mkdir -p /var/agents-clipboard /var/log /var/run
 
 # Runtime: register Pi packages + Claude/Cursor MCP into mounted config dirs
 COPY container-entrypoint.sh /usr/local/bin/container-entrypoint

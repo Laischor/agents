@@ -191,9 +191,16 @@ if ! docker ps --format '{{.Names}}' | grep -qx agents; then
   ensure_services
 fi
 
-# Screenshot paste into Claude needs the host clipboard bridge
-if [[ "$cmd" == "claude" ]]; then
-  ensure_clipboard_bridge
-fi
+# Screenshot paste: host bridge → xclip/wl-paste stubs (Claude + Cursor CLI).
+# DISPLAY=:0 is a no-op for Claude; Cursor only probes clipboard when DISPLAY is set.
+# (Avoid empty "${arr[@]}" under macOS bash 3.2 + set -u.)
+case "$cmd" in
+  claude|agent|cursor-agent)
+    ensure_clipboard_bridge
+    exec "${COMPOSE[@]}" exec -it -w "$workdir" \
+      -e "DISPLAY=${DISPLAY:-:0}" \
+      "$SERVICE" "$cmd" "$@"
+    ;;
+esac
 
 exec "${COMPOSE[@]}" exec -it -w "$workdir" "$SERVICE" "$cmd" "$@"

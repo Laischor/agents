@@ -163,6 +163,37 @@ ensure_cursor_codegraph_mcp() {
   fi
 }
 
+# Single background janitor: kill orphaned codegraph MCP trees; reap via init:true.
+ensure_agents_janitor() {
+  local pid_file="/var/run/agents-janitor.pid"
+  local log_file="/var/log/agents-janitor.log"
+  local janitor="/usr/local/bin/agents-janitor"
+
+  [[ -x "$janitor" ]] || return 0
+
+  mkdir -p /var/run /var/log
+
+  if [[ -f "$pid_file" ]]; then
+    local old
+    old="$(tr -d ' \n' <"$pid_file" 2>/dev/null || true)"
+    if [[ -n "$old" ]] && kill -0 "$old" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$pid_file"
+  fi
+
+  # Belts: any live janitor process (pidfile may be stale after OOM)
+  if pgrep -f '^bash /usr/local/bin/agents-janitor$' >/dev/null 2>&1 \
+    || pgrep -f '^/usr/local/bin/agents-janitor$' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Disown from this exec session so the janitor outlives interactive shells.
+  # Script itself flock-locks so a race still yields a single instance.
+  nohup "$janitor" >>"$log_file" 2>&1 &
+  printf '%s\n' "$!" >"$pid_file"
+}
+
 ensure_git_identity
 
 ensure_pi_package "v2nic/pi-caveman" \
@@ -173,5 +204,6 @@ ensure_pi_package "@vndv/pi-codegraph" \
 ensure_claude_caveman
 ensure_claude_codegraph_mcp
 ensure_cursor_codegraph_mcp
+ensure_agents_janitor
 
 exec "$@"

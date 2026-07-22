@@ -80,12 +80,13 @@ On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/
 
 Git in the container uses `/etc/gitconfig` for `safe.directory *` and `credential.helper = !gh auth git-credential`. Host `~/.gitconfig` is mounted at `/etc/gitconfig.host` (read-only) so only `user.name` / `user.email` are copied into the container — not macOS credential helpers that clear the chain or point at `/opt/homebrew/bin/gh`. On the host you can use the same pathless helper: `helper = !gh auth git-credential`.
 
-## Screenshot paste (Claude)
+## Screenshot paste (Claude + Cursor)
 
-Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PNGs into `data/clipboard/`; stubs for `xclip` / `wl-paste` inside the container serve them to Claude Code.
+Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PNGs into `data/clipboard/`; stubs for `xclip` / `wl-paste` inside the container serve them to Claude Code and the Cursor CLI (`agent`).
 
-- Starts automatically with `dclaude` / `dclaudex` (or: `agents clipboard-bridge --daemon`)
+- Starts automatically with `dagent` / `dclaude` / `dclaudex` (or: `agents clipboard-bridge --daemon`)
 - Copy a screenshot to the clipboard, then paste with **Ctrl+V** (not Cmd+V)
+- Cursor needs a dummy `DISPLAY` (set in Compose / `run.sh`) so it will call the stubs
 - Status / stop: `agents clipboard-bridge --status` · `agents clipboard-bridge --stop`
 
 ## Hermes Agent
@@ -145,11 +146,21 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 | `data/cursor-config/`  | `/root/.config/cursor` (login tokens) |
 | `data/pi/`             | `/root/.pi`             |
 | `data/claude/`         | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
-| `data/clipboard/`      | `/var/agents-clipboard` (host PNG bridge for Claude paste) |
+| `data/clipboard/`      | `/var/agents-clipboard` (host PNG bridge for Claude/Cursor paste) |
 | `data/cliproxy/`       | CLIProxyAPI config + OAuth (`auths/`) |
 | `data/hermes/`         | Hermes Agent config / sessions (`/opt/data`) |
 
 `data/` and `.env` are gitignored.
+
+## Process hygiene (long-lived container)
+
+The `agents` container stays up for many `compose exec` / Hermes sessions. Each session can leave behind MCP children (`codegraph serve`) or zombies. Compose enables:
+
+- **`init: true`** — Docker’s tini as PID 1 reaps zombies
+- **`mem_limit: 3g`** — hard memory cap so thrash cannot freeze the whole container (Colima defaults to 4g)
+- **`agents-janitor`** — background loop (started once via the entrypoint) that kills *orphaned* `codegraph` trees with no living `claude` / Cursor agent parent; under low `MemAvailable` (&lt;256 MiB) it also drops the oldest orphans first. Log: `/var/log/agents-janitor.log`
+
+After changing these, rebuild/recreate from the **host** (`./start.sh` or `docker compose up -d --build agents`). Check: `docker compose exec agents ps -p 1 -o args=` (should show `docker-init` / tini) and `docker stats agents` (≈3 Gi limit).
 
 ## Caveman & CodeGraph
 

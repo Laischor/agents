@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Minimal wl-paste stub: serve host-synced PNG for Claude Code image paste.
+# Minimal wl-paste stub: serve host-synced PNG for Claude/Cursor image paste.
 set -u
 
 CLIP_DIR="${AGENTS_CLIPBOARD_DIR:-/var/agents-clipboard}"

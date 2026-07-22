@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Mirror macOS clipboard images into data/clipboard/image.png for the agents container.
-# Claude Code inside Docker reads them via the xclip/wl-paste stubs.
+# Claude Code / Cursor CLI inside Docker read them via the xclip/wl-paste stubs.
 # Usage: ./clipboard-bridge.sh           # foreground
 #        ./clipboard-bridge.sh --daemon  # background (PID in data/clipboard/bridge.pid)
 
@@ -123,7 +123,7 @@ Mirrors macOS clipboard PNGs into:
   $IMG
 
 The agents container exposes this via xclip/wl-paste stubs so Claude Code
-can Ctrl+V screenshots (Cmd+V does not work in Claude's TUI).
+and the Cursor CLI can Ctrl+V screenshots (Cmd+V does not work in the TUI).
 EOF
     exit 0
     ;;

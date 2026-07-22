@@ -240,7 +240,7 @@ start_agents() {
 
   log "Fertig. Beispiele: dagent | dpi | dclaude | dclaudex | agents-shell"
   log "Claudex OAuth (einmalig): agents cliproxy-login"
-  log "Screenshot-Paste in Claude: Bridge startet mit dclaude (Ctrl+V, nicht Cmd+V)"
+  log "Screenshot-Paste: Bridge startet mit dagent/dclaude (Ctrl+V, nicht Cmd+V)"
   if hermes_enabled; then
     log "Hermes Dashboard: http://127.0.0.1:9119 (Login: ${HERMES_DASHBOARD_USER})"
     log "Hermes CLI: agents hermes-setup (einmalig) | agents hermes"

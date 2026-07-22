@@ -48,7 +48,8 @@ services:
       TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "true"
       TERMINAL_CONTAINER_PERSISTENT: "true"
       TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","CLIPROXY_API_KEY","GH_TOKEN","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR"]'
-      TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard"}'
+      # DISPLAY=:0 → Cursor CLI will call xclip stubs (no real X11 needed)
+      TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard","DISPLAY":":0"}'
       # Host-absolute bind mounts (compose interpolates before the container sees them)
       TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${HOME}/.gitconfig:/etc/gitconfig.host:ro","${HOME}/.ssh:/root/.ssh:ro","${HOME}/.config/gh:/root/.config/gh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
     volumes:
@@ -86,6 +87,10 @@ services:
     working_dir: ${HOST_PROJECTS}
     stdin_open: true
     tty: true
+    # tini as PID 1 — reap zombies from dead MCP/agent children
+    init: true
+    # Hard cap so thrash/OOM cannot freeze the whole long-lived container
+    mem_limit: 3g
     depends_on:
       - cli-proxy-api
     environment:
@@ -106,6 +111,8 @@ services:
       CAVEMAN_DEFAULT_MODE: ultra
       # Host clipboard-bridge.sh → stubs (xclip/wl-paste) for screenshot paste
       AGENTS_CLIPBOARD_DIR: /var/agents-clipboard
+      # Dummy display so Cursor CLI enables linux clipboard image paste (xclip stubs)
+      DISPLAY: ":0"
     volumes:
       # Same path as host so compose bind mounts resolve correctly
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
@@ -121,7 +128,7 @@ services:
       - ./data/cursor-config:/root/.config/cursor
       - ./data/pi:/root/.pi
       - ./data/claude:/root/.claude
-      # macOS clipboard bridge drop dir (PNG for Claude Ctrl+V paste)
+      # macOS clipboard bridge drop dir (PNG for Claude/Cursor Ctrl+V paste)
       - ./data/clipboard:/var/agents-clipboard
     # Keep the container running for interactive exec
     command: ["sleep", "infinity"]
