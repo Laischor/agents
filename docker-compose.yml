@@ -50,7 +50,7 @@ services:
       TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","CLIPROXY_API_KEY","GH_TOKEN","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR"]'
       TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard"}'
       # Host-absolute bind mounts (compose interpolates before the container sees them)
-      TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${HOME}/.gitconfig:/root/.gitconfig:ro","${HOME}/.ssh:/root/.ssh:ro","${HOME}/.config/gh:/root/.config/gh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
+      TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${HOME}/.gitconfig:/etc/gitconfig.host:ro","${HOME}/.ssh:/root/.ssh:ro","${HOME}/.config/gh:/root/.config/gh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
     volumes:
       - ./data/hermes:/opt/data
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
@@ -111,7 +111,8 @@ services:
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       # Host identity for git commits + GitHub SSH / gh CLI
-      - ${HOME}/.gitconfig:/root/.gitconfig:ro
+      # Identity only — credential helper + safe.directory live in /etc/gitconfig
+      - ${HOME}/.gitconfig:/etc/gitconfig.host:ro
       - ${HOME}/.ssh:/root/.ssh:ro
       - ${HOME}/.config/gh:/root/.config/gh:ro
       # Persist configs on the host (survive rebuild / down -v)

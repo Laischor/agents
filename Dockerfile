@@ -32,11 +32,11 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
   && rm -rf /var/lib/apt/lists/* \
   && gh --version
 
-# macOS ~/.gitconfig (bind-mounted) often hardcodes Homebrew as credential helper:
-#   helper = !/opt/homebrew/bin/gh auth git-credential
-# Bridge that path to Debian's /usr/bin/gh so HTTPS push/pull works with GH_TOKEN.
-RUN mkdir -p /opt/homebrew/bin \
-  && ln -sf /usr/bin/gh /opt/homebrew/bin/gh
+# Root in container, repos owned by host UID → dubious ownership without this.
+# Credential helper here (not bind-mounted ~/.gitconfig): macOS gitconfig often
+# clears helpers and points at /opt/homebrew/bin/gh, which does not exist here.
+RUN git config --system safe.directory '*' \
+  && git config --system credential.helper '!gh auth git-credential'
 
 # Docker CLI + Compose plugin (talks to host daemon via mounted socket)
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker

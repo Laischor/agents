@@ -1,0 +1,23 @@
+---
+description: Agent sessions run inside agents:local — do not rebuild/restart that container
+alwaysApply: true
+---
+
+# Container session safety
+
+This workspace is often opened **inside** the `agents:local` Docker container (via Hermes sandbox or `agents-shell`). The agent process lives in that container.
+
+**Never run** while working in this repo (unless the user explicitly asks and understands the cost):
+
+- `docker compose build` / `docker compose up --build`
+- `docker build` for `agents:local`
+- `./start.sh` when it would rebuild or recreate `agents`
+- `docker compose restart agents` / `docker stop agents`
+
+These kill the current agent session.
+
+**Safe instead:**
+
+- Edit `Dockerfile`, `container-entrypoint.sh`, `docker-compose.yml` as needed
+- Tell the user to rebuild from the **host**: `./start.sh` or `docker compose build agents && docker compose up -d agents`
+- Verify image changes with read-only checks (`git diff`, syntax review) — not `docker run`/`docker compose build` from inside the container

@@ -78,7 +78,7 @@ On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/
 
 `./start.sh` and `run.sh` call `gh auth token` on the host and pass the result as `GH_TOKEN` into the container (and Hermes sandbox). Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
 
-macOS `~/.gitconfig` often hardcodes Homebrew’s credential helper (`!/opt/homebrew/bin/gh auth git-credential`). The image ships a symlink `/opt/homebrew/bin/gh` → `/usr/bin/gh` so HTTPS git auth still works when that config is bind-mounted.
+Git in the container uses `/etc/gitconfig` for `safe.directory *` and `credential.helper = !gh auth git-credential`. Host `~/.gitconfig` is mounted at `/etc/gitconfig.host` (read-only) so only `user.name` / `user.email` are copied into the container — not macOS credential helpers that clear the chain or point at `/opt/homebrew/bin/gh`. On the host you can use the same pathless helper: `helper = !gh auth git-credential`.
 
 ## Screenshot paste (Claude)
 
@@ -138,7 +138,7 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 
 | Host              | Container            |
 |-------------------|----------------------|
-| `~/.gitconfig`         | `/root/.gitconfig` (read-only) |
+| `~/.gitconfig`         | `/etc/gitconfig.host` (read-only; identity only) |
 | `~/.ssh/`              | `/root/.ssh` (read-only, GitHub SSH) |
 | `~/.config/gh/`        | `/root/.config/gh` (read-only; config only — token via `GH_TOKEN`) |
 | `data/cursor/`         | `/root/.cursor`         |

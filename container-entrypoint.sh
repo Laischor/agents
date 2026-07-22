@@ -4,6 +4,25 @@
 
 set -u
 
+# Host ~/.gitconfig is mounted read-only at /etc/gitconfig.host (not /root/.gitconfig).
+# macOS configs often reset credential helpers and hardcode Homebrew paths; system
+# /etc/gitconfig supplies safe.directory + `gh auth git-credential` instead.
+ensure_git_identity() {
+  local host_cfg="/etc/gitconfig.host"
+  [[ -f "$host_cfg" ]] || return
+
+  local name email
+  name="$(git config -f "$host_cfg" --get user.name 2>/dev/null || true)"
+  email="$(git config -f "$host_cfg" --get user.email 2>/dev/null || true)"
+
+  if [[ -n "$name" ]]; then
+    git config --global user.name "$name"
+  fi
+  if [[ -n "$email" ]]; then
+    git config --global user.email "$email"
+  fi
+}
+
 # ~/.pi is mounted from the host, so Pi packages must be registered after the
 # volume is available rather than while the image is being built.
 ensure_pi_package() {
@@ -143,6 +162,8 @@ ensure_cursor_codegraph_mcp() {
     printf 'warning: could not configure codegraph MCP for Cursor\n' >&2
   fi
 }
+
+ensure_git_identity
 
 ensure_pi_package "v2nic/pi-caveman" \
   "git:github.com/v2nic/pi-caveman@2480692ffabddc3d1efec8eb822e664ff7e0e5ef"
