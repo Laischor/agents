@@ -117,6 +117,7 @@ ensure_data_dirs() {
     "$AGENTS_DIR/data/cmux/running" \
     "$AGENTS_DIR/data/cmux/results" \
     "$AGENTS_DIR/data/cmux/logs" \
+    "$AGENTS_DIR/data/cmux/sessions" \
     "$AGENTS_DIR/data/cliproxy/auths"
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes"

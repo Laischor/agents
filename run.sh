@@ -99,7 +99,8 @@ ensure_services() {
     "$AGENTS_DIR/data/gpu/running" "$AGENTS_DIR/data/gpu/results" \
     "$AGENTS_DIR/data/gpu/logs" \
     "$AGENTS_DIR/data/cmux/jobs" "$AGENTS_DIR/data/cmux/running" \
-    "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs"
+    "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs" \
+    "$AGENTS_DIR/data/cmux/sessions"
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes"
     "${COMPOSE[@]}" --profile hermes up -d --quiet-pull
@@ -119,8 +120,53 @@ ensure_clipboard_bridge() {
 ensure_cmux_bridge() {
   [[ "$(uname -s)" == "Darwin" ]] || return 0
   mkdir -p "$AGENTS_DIR/data/cmux/jobs" "$AGENTS_DIR/data/cmux/running" \
-    "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs"
+    "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs" \
+    "$AGENTS_DIR/data/cmux/sessions"
+  register_cmux_session
   "$AGENTS_DIR/cmux-bridge.sh" --daemon
+}
+
+# Record the host TTY for this cmux pane so the bridge can emit OSC 777
+# without needing the cmux control socket (no allowAll / Full open access).
+register_cmux_session() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+  local sessions="$AGENTS_DIR/data/cmux/sessions"
+  local tty_path
+  tty_path="$(tty 2>/dev/null || true)"
+  [[ -n "$tty_path" && -e "$tty_path" ]] || return 0
+  mkdir -p "$sessions"
+  CMUX_SESSION_TTY="$tty_path" \
+  CMUX_SESSION_SURFACE="${CMUX_SURFACE_ID:-}" \
+  CMUX_SESSION_WORKSPACE="${CMUX_WORKSPACE_ID:-}" \
+  CMUX_SESSION_TAB="${CMUX_TAB_ID:-}" \
+  CMUX_SESSIONS_DIR="$sessions" \
+  python3 - <<'PY'
+import json, os, re, time
+sessions = os.environ["CMUX_SESSIONS_DIR"]
+tty = os.environ["CMUX_SESSION_TTY"]
+surface = (os.environ.get("CMUX_SESSION_SURFACE") or "").strip()
+meta = {
+    "tty": tty,
+    "surface_id": surface or None,
+    "workspace_id": (os.environ.get("CMUX_SESSION_WORKSPACE") or "").strip() or None,
+    "tab_id": (os.environ.get("CMUX_SESSION_TAB") or "").strip() or None,
+    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+}
+latest = os.path.join(sessions, "latest.json")
+tmp = latest + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(meta, fh)
+    fh.write("\n")
+os.replace(tmp, latest)
+if surface:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", surface)[:120]
+    dest = os.path.join(sessions, f"{safe}.json")
+    tmp = dest + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(meta, fh)
+        fh.write("\n")
+    os.replace(tmp, dest)
+PY
 }
 
 # Forward cmux pane routing env into the container (empty if unset is fine;

@@ -99,11 +99,13 @@ argv = sys.argv[5:]
 env = {}
 for key in (
     "CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_WINDOW_ID",
-    "CMUX_SOCKET_PATH", "TERM_PROGRAM", "TERM",
+    "TERM_PROGRAM", "TERM",
 ):
     val = os.environ.get(key)
     if val:
         env[key] = val
+# Do not forward CMUX_SOCKET_PATH from the Linux container — it can point at a
+# non-existent/stale path and break the host cmux CLI with Broken pipe.
 job = {
     "id": jid,
     "argv": argv,

@@ -91,17 +91,28 @@ Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PN
 
 ## cmux notifications / sounds
 
-Docker cannot reach the host cmux Unix socket (`/tmp/cmux.sock`). **cmux-bridge** queues container `cmux` CLI calls through `data/cmux/`; the host daemon runs the real macOS `cmux` (pane rings, desktop notifications, sounds).
+Docker cannot use the host cmux control socket without opening it to every local process. Instead **cmux-bridge** delivers alerts without that:
+
+1. `run.sh` registers the host TTY of the launching cmux pane under `data/cmux/sessions/`
+2. Container `cmux notify` / agent hooks enqueue a job in `data/cmux/`
+3. The host daemon writes **OSC 777** to that TTY (pane ring + desktop notification) and plays **afplay**
 
 - Starts automatically with `dagent` / `dclaude` / `dclaudex` (or: `agents cmux-bridge --daemon`)
-- Container stub: `cmux` / `cmux-agent-hook` (Claude `Notification`/`Stop` and Cursor `stop`/`afterAgentResponse` hooks are wired by the entrypoint)
-- Forwards `CMUX_WORKSPACE_ID` / `CMUX_SURFACE_ID` from the launching cmux pane into the container
-- If the bridge or socket is down, the stub falls back to OSC 777 on the PTY (ring/sound still work in interactive sessions)
+- Container stub: `cmux` / `cmux-agent-hook` (Claude `Notification`/`Stop`, Cursor `stop`/`afterAgentResponse`)
+- Forwards `CMUX_WORKSPACE_ID` / `CMUX_SURFACE_ID` for per-pane session routing
+- Stop hooks always notify (cmux `hooks … stop` alone only updates sidebar state)
+- **No** cmux “Full open access” / `allowAll` required
 - Status / stop: `agents cmux-bridge --status` · `agents cmux-bridge --stop`
 
-Optional: copy [`cmux/config.env.example`](cmux/config.env.example) to `data/cmux/config.env` and set `CMUX_BIN=…` if cmux is not under `/Applications/cmux.app`.
+Optional: copy [`cmux/config.env.example`](cmux/config.env.example) to `data/cmux/config.env` — `CMUX_BRIDGE_SOUND=0` to mute host afplay, or `CMUX_BRIDGE_SOUND_FILE=…`.
 
-Rebuild/recreate `agents` from the **host** after this change so the image includes the stub and the `data/cmux` mount.
+After changing the host bridge script:
+
+```bash
+agents cmux-bridge --stop && agents cmux-bridge --daemon
+```
+
+Launch agents from a **cmux** pane so the TTY can be registered. Rebuild/recreate `agents` from the **host** when the container stub changed.
 
 ## GPU bridge (Blender + Godot / Metal)
 

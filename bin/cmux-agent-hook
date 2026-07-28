@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Claude/Cursor hook helper: prefer host cmux hooks; fall back to cmux notify.
+# Claude/Cursor hook helper → host cmux-bridge via container `cmux` stub.
 # Usage: cmux-agent-hook <claude|cursor> <event>
 # Reads agent hook JSON from stdin.
+#
+# Always `cmux notify` — bridge delivers OSC to the registered host TTY + afplay.
+# (cmux `hooks … stop` alone only updates sidebar state, no desktop alert.)
 
 set -euo pipefail
 
@@ -14,24 +17,6 @@ fi
 
 input="$(cat || true)"
 
-# Forward to cmux hook handlers when available (via container stub → host bridge).
-if printf '%s' "$input" | cmux hooks "$agent" "$event" 2>/dev/null; then
-  exit 0
-fi
-
-# Legacy aliases
-if [[ "$agent" == "claude" ]]; then
-  if printf '%s' "$input" | cmux claude-hook "$event" 2>/dev/null; then
-    exit 0
-  fi
-fi
-if [[ "$agent" == "cursor" ]]; then
-  if printf '%s' "$input" | cmux cursor-hook "$event" 2>/dev/null; then
-    exit 0
-  fi
-fi
-
-# Parse a short title/body from common hook JSON shapes.
 eval "$(
   printf '%s' "$input" | python3 -c '
 import json, shlex, sys
@@ -52,14 +37,22 @@ for key in ("body", "message", "subtitle"):
         body = str(notif[key])
         break
 if not body:
-    for key in ("message", "body", "text", "status"):
+    for key in ("message", "body", "text", "status", "last_assistant_message"):
         if data.get(key):
             body = str(data[key])
             break
+cwd = data.get("cwd") or ""
+project = cwd.rstrip("/").split("/")[-1] if cwd else ""
 if not title:
-    title = agent.title()
+    title = f"{agent.title()}" + (f" [{project}]" if project else "")
+event_l = (event or "").lower()
 if not body:
-    body = event
+    if event_l in ("notification", "needs-input"):
+        body = "Waiting for input"
+    elif event_l in ("stop", "agent-response"):
+        body = "Done — needs attention"
+    else:
+        body = event
 title = title.replace("\n", " ")[:80]
 body = body.replace("\n", " ")[:160]
 print(f"title={shlex.quote(title)}")
@@ -70,5 +63,5 @@ print(f"body={shlex.quote(body)}")
 title="${title:-${agent}}"
 body="${body:-$event}"
 
-cmux notify --title "$title" --body "$body" 2>/dev/null || true
+cmux notify --title "$title" --body "$body" >/dev/null 2>&1 || true
 exit 0
