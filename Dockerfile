@@ -91,17 +91,28 @@ RUN npm install -g @colbymchenry/codegraph@1.4.1 \
 RUN npm install -g @anthropic-ai/claude-code \
   && claude --version
 
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pil \
+  && rm -rf /var/lib/apt/lists/*
+
 # Ensure PATH survives login shells (bash -l)
 RUN printf '%s\n' 'export PATH="/root/.local/bin:$PATH"' > /etc/profile.d/agents-path.sh
 
 # Fake clipboard tools: host clipboard-bridge.sh writes PNGs here; Claude paste reads them
-ENV AGENTS_CLIPBOARD_DIR=/var/agents-clipboard
+ENV AGENTS_CLIPBOARD_DIR=/var/agents-clipboard \
+    AGENTS_GPU_DIR=/var/agents-gpu \
+    AGENTS_CMUX_DIR=/var/agents-cmux
 COPY clipboard/xclip clipboard/wl-paste /usr/local/bin/
 COPY bin/claudex /usr/local/bin/claudex
 COPY bin/agents-janitor.sh /usr/local/bin/agents-janitor
+# Host GPU bridge shims (Blender/Godot run on macOS via gpu-bridge.sh)
+COPY bin/gpu-job bin/blender bin/godot /usr/local/bin/
+# Host cmux bridge stub (notifications/sounds via cmux-bridge.sh on macOS)
+COPY bin/cmux bin/cmux-agent-hook /usr/local/bin/
 RUN chmod +x /usr/local/bin/xclip /usr/local/bin/wl-paste /usr/local/bin/claudex \
       /usr/local/bin/agents-janitor \
-  && mkdir -p /var/agents-clipboard /var/log /var/run
+      /usr/local/bin/gpu-job /usr/local/bin/blender /usr/local/bin/godot \
+      /usr/local/bin/cmux /usr/local/bin/cmux-agent-hook \
+  && mkdir -p /var/agents-clipboard /var/agents-gpu /var/agents-cmux /var/log /var/run
 
 # Runtime: register Pi packages + Claude/Cursor MCP into mounted config dirs
 COPY container-entrypoint.sh /usr/local/bin/container-entrypoint

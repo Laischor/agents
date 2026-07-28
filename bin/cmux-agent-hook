@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Claude/Cursor hook helper: prefer host cmux hooks; fall back to cmux notify.
+# Usage: cmux-agent-hook <claude|cursor> <event>
+# Reads agent hook JSON from stdin.
+
+set -euo pipefail
+
+agent="${1:-}"
+event="${2:-}"
+if [[ -z "$agent" || -z "$event" ]]; then
+  echo "usage: cmux-agent-hook <claude|cursor> <event>" >&2
+  exit 2
+fi
+
+input="$(cat || true)"
+
+# Forward to cmux hook handlers when available (via container stub → host bridge).
+if printf '%s' "$input" | cmux hooks "$agent" "$event" 2>/dev/null; then
+  exit 0
+fi
+
+# Legacy aliases
+if [[ "$agent" == "claude" ]]; then
+  if printf '%s' "$input" | cmux claude-hook "$event" 2>/dev/null; then
+    exit 0
+  fi
+fi
+if [[ "$agent" == "cursor" ]]; then
+  if printf '%s' "$input" | cmux cursor-hook "$event" 2>/dev/null; then
+    exit 0
+  fi
+fi
+
+# Parse a short title/body from common hook JSON shapes.
+eval "$(
+  printf '%s' "$input" | python3 -c '
+import json, shlex, sys
+agent, event = sys.argv[1:3]
+raw = sys.stdin.read()
+data = {}
+try:
+    data = json.loads(raw) if raw.strip() else {}
+except json.JSONDecodeError:
+    data = {}
+title = None
+body = None
+notif = data.get("notification") if isinstance(data.get("notification"), dict) else {}
+if notif.get("title"):
+    title = str(notif["title"])
+for key in ("body", "message", "subtitle"):
+    if notif.get(key):
+        body = str(notif[key])
+        break
+if not body:
+    for key in ("message", "body", "text", "status"):
+        if data.get(key):
+            body = str(data[key])
+            break
+if not title:
+    title = agent.title()
+if not body:
+    body = event
+title = title.replace("\n", " ")[:80]
+body = body.replace("\n", " ")[:160]
+print(f"title={shlex.quote(title)}")
+print(f"body={shlex.quote(body)}")
+' "$agent" "$event"
+)"
+
+title="${title:-${agent}}"
+body="${body:-$event}"
+
+cmux notify --title "$title" --body "$body" 2>/dev/null || true
+exit 0

@@ -163,6 +163,112 @@ ensure_cursor_codegraph_mcp() {
   fi
 }
 
+# Wire Claude Notification/Stop → cmux stub (host cmux-bridge for sounds/rings).
+# Idempotent: skips when our marker command is already present.
+ensure_claude_cmux_hooks() {
+  local claude_dir="${CLAUDE_CONFIG_DIR:-/root/.claude}"
+  local settings="${claude_dir}/settings.json"
+  mkdir -p "$claude_dir"
+
+  if [[ -f "$settings" ]] && grep -Fq 'cmux-agent-hook' "$settings" 2>/dev/null; then
+    return
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'warning: python3 missing; skip cmux Claude hooks\n' >&2
+    return
+  fi
+
+  printf 'Configuring Claude hooks: cmux notifications\n'
+  CLAUDE_SETTINGS="$settings" python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+path = Path(os.environ["CLAUDE_SETTINGS"])
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text() or "{}")
+    except json.JSONDecodeError:
+        data = {}
+
+hooks = data.setdefault("hooks", {})
+marker = "cmux-agent-hook"
+
+def has_marker(event: str) -> bool:
+    for group in hooks.get(event) or []:
+        for h in (group.get("hooks") or []):
+            if marker in str(h.get("command") or ""):
+                return True
+    return False
+
+def add(event: str, cmd: str):
+    if has_marker(event):
+        return
+    entry = {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": cmd, "timeout": 10}],
+    }
+    hooks.setdefault(event, []).append(entry)
+
+add("Notification", "cmux-agent-hook claude notification")
+add("Stop", "cmux-agent-hook claude stop")
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+}
+
+# Wire Cursor stop/afterAgentResponse → cmux stub.
+ensure_cursor_cmux_hooks() {
+  local hooks_json="${HOME}/.cursor/hooks.json"
+  mkdir -p "${HOME}/.cursor"
+
+  if [[ -f "$hooks_json" ]] && grep -Fq 'cmux-agent-hook' "$hooks_json" 2>/dev/null; then
+    return
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'warning: python3 missing; skip cmux Cursor hooks\n' >&2
+    return
+  fi
+
+  printf 'Configuring Cursor hooks: cmux notifications\n'
+  CURSOR_HOOKS="$hooks_json" python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+path = Path(os.environ["CURSOR_HOOKS"])
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text() or "{}")
+    except json.JSONDecodeError:
+        data = {}
+
+if "version" not in data:
+    data["version"] = 1
+
+hooks = data.setdefault("hooks", {})
+marker = "cmux-agent-hook"
+
+def has_marker(event: str) -> bool:
+    for entry in hooks.get(event) or []:
+        if isinstance(entry, dict) and marker in str(entry.get("command") or ""):
+            return True
+        if isinstance(entry, str) and marker in entry:
+            return True
+    return False
+
+def add(event: str, cmd: str):
+    if has_marker(event):
+        return
+    hooks.setdefault(event, []).append({"command": cmd})
+
+add("stop", "cmux-agent-hook cursor stop")
+add("afterAgentResponse", "cmux-agent-hook cursor agent-response")
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+}
+
 # Single background janitor: kill orphaned codegraph MCP trees; reap via init:true.
 ensure_agents_janitor() {
   local pid_file="/var/run/agents-janitor.pid"
@@ -203,7 +309,9 @@ ensure_pi_package "@vndv/pi-codegraph" \
 
 ensure_claude_caveman
 ensure_claude_codegraph_mcp
+ensure_claude_cmux_hooks
 ensure_cursor_codegraph_mcp
+ensure_cursor_cmux_hooks
 ensure_agents_janitor
 
 exec "$@"

@@ -109,6 +109,14 @@ ensure_data_dirs() {
     "$AGENTS_DIR/data/pi" \
     "$AGENTS_DIR/data/claude" \
     "$AGENTS_DIR/data/clipboard" \
+    "$AGENTS_DIR/data/gpu/jobs" \
+    "$AGENTS_DIR/data/gpu/running" \
+    "$AGENTS_DIR/data/gpu/results" \
+    "$AGENTS_DIR/data/gpu/logs" \
+    "$AGENTS_DIR/data/cmux/jobs" \
+    "$AGENTS_DIR/data/cmux/running" \
+    "$AGENTS_DIR/data/cmux/results" \
+    "$AGENTS_DIR/data/cmux/logs" \
     "$AGENTS_DIR/data/cliproxy/auths"
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes"

@@ -89,6 +89,61 @@ Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PN
 - Cursor needs a dummy `DISPLAY` (set in Compose / `run.sh`) so it will call the stubs
 - Status / stop: `agents clipboard-bridge --status` · `agents clipboard-bridge --stop`
 
+## cmux notifications / sounds
+
+Docker cannot reach the host cmux Unix socket (`/tmp/cmux.sock`). **cmux-bridge** queues container `cmux` CLI calls through `data/cmux/`; the host daemon runs the real macOS `cmux` (pane rings, desktop notifications, sounds).
+
+- Starts automatically with `dagent` / `dclaude` / `dclaudex` (or: `agents cmux-bridge --daemon`)
+- Container stub: `cmux` / `cmux-agent-hook` (Claude `Notification`/`Stop` and Cursor `stop`/`afterAgentResponse` hooks are wired by the entrypoint)
+- Forwards `CMUX_WORKSPACE_ID` / `CMUX_SURFACE_ID` from the launching cmux pane into the container
+- If the bridge or socket is down, the stub falls back to OSC 777 on the PTY (ring/sound still work in interactive sessions)
+- Status / stop: `agents cmux-bridge --status` · `agents cmux-bridge --stop`
+
+Optional: copy [`cmux/config.env.example`](cmux/config.env.example) to `data/cmux/config.env` and set `CMUX_BIN=…` if cmux is not under `/Applications/cmux.app`.
+
+Rebuild/recreate `agents` from the **host** after this change so the image includes the stub and the `data/cmux` mount.
+
+## GPU bridge (Blender + Godot / Metal)
+
+Docker on macOS cannot use Metal. Instead, opt-in **gpu-bridge** runs native Blender/Godot on the host; container `blender` / `godot` shims submit jobs via `data/gpu/`.
+
+**Not** started automatically (unlike the clipboard bridge).
+
+```bash
+# Host: start the daemon (once per login / when you need GPU tools)
+agents gpu-bridge --daemon
+agents gpu-bridge --status   # shows resolved Blender/Godot paths
+agents gpu-bridge --stop
+```
+
+Optional overrides — copy [`gpu/config.env.example`](gpu/config.env.example) to `data/gpu/config.env`:
+
+```bash
+BLENDER_BIN=/Applications/Blender.app/Contents/MacOS/Blender
+GODOT_BIN=/Applications/Godot.app/Contents/MacOS/Godot
+# or: GODOT_BIN=/opt/homebrew/bin/godot
+GPU_JOB_TIMEOUT=600
+```
+
+Defaults: Blender at `/Applications/Blender.app/Contents/MacOS/Blender`; Godot probes `/Applications/Godot*.app`, Homebrew, and `/usr/local/bin/godot`.
+
+From `agents-shell` (after rebuilding the image so the shims exist):
+
+```bash
+gpu-job status
+blender --version
+godot --version
+# Example render (paths must stay under HOST_PROJECTS):
+# blender --background "$HOST_PROJECTS/my-scene/scene.blend" -o "$HOST_PROJECTS/my-scene/out/frame" -f 1
+# godot --headless --path "$HOST_PROJECTS/my-game" --quit
+```
+
+Security: only `blender` and `godot` are allowlisted; `cwd` and path-like args must stay under `HOST_PROJECTS`; one job at a time; per-job timeout. Jobs left in `data/gpu/running/` after a crash are marked error on the next daemon start.
+
+In the Hermes sandbox (`/workspace`), shims map cwd back to `$HOST_PROJECTS/…` when `HOST_PROJECTS` is set; prefer absolute paths under `HOST_PROJECTS` for args. Override cwd with `GPU_JOB_CWD=…` if needed.
+
+Rebuild/recreate `agents` from the **host** after this change (`./start.sh` or `docker compose build agents && docker compose up -d agents`) so the image includes the shims and the `data/gpu` mount.
+
 ## Hermes Agent
 
 Optional [Nous Hermes Agent](https://hermes-agent.nousresearch.com/) gateway (`nousresearch/hermes-agent`). Disabled by default — only starts when `HERMES=1` in `.env` (Compose profile `hermes`).
@@ -147,6 +202,8 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 | `data/pi/`             | `/root/.pi`             |
 | `data/claude/`         | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
 | `data/clipboard/`      | `/var/agents-clipboard` (host PNG bridge for Claude/Cursor paste) |
+| `data/gpu/`            | `/var/agents-gpu` (host Blender/Godot job queue via gpu-bridge) |
+| `data/cmux/`           | `/var/agents-cmux` (host cmux notify/hooks queue via cmux-bridge) |
 | `data/cliproxy/`       | CLIProxyAPI config + OAuth (`auths/`) |
 | `data/hermes/`         | Hermes Agent config / sessions (`/opt/data`) |
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch an agent CLI inside the agents container.
-# Usage: run.sh <agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|cursor-agent|codegraph|clipboard-bridge|bash> [args...]
+# Usage: run.sh <agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|cursor-agent|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]
 
 set -euo pipefail
 
@@ -95,7 +95,11 @@ EOF
 
 ensure_services() {
   ensure_cliproxy_config
-  mkdir -p "$AGENTS_DIR/data/clipboard"
+  mkdir -p "$AGENTS_DIR/data/clipboard" "$AGENTS_DIR/data/gpu/jobs" \
+    "$AGENTS_DIR/data/gpu/running" "$AGENTS_DIR/data/gpu/results" \
+    "$AGENTS_DIR/data/gpu/logs" \
+    "$AGENTS_DIR/data/cmux/jobs" "$AGENTS_DIR/data/cmux/running" \
+    "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs"
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes"
     "${COMPOSE[@]}" --profile hermes up -d --quiet-pull
@@ -111,17 +115,34 @@ ensure_clipboard_bridge() {
   "$AGENTS_DIR/clipboard-bridge.sh" --daemon
 }
 
+# Host-side: forward container cmux CLI → host cmux (notifications/sounds).
+ensure_cmux_bridge() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+  mkdir -p "$AGENTS_DIR/data/cmux/jobs" "$AGENTS_DIR/data/cmux/running" \
+    "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs"
+  "$AGENTS_DIR/cmux-bridge.sh" --daemon
+}
+
+# Forward cmux pane routing env into the container (empty if unset is fine;
+# the cmux stub only forwards non-empty values to the host bridge).
+CMUX_DOCKER_ENV=(
+  -e "CMUX_WORKSPACE_ID=${CMUX_WORKSPACE_ID:-}"
+  -e "CMUX_SURFACE_ID=${CMUX_SURFACE_ID:-}"
+  -e "CMUX_TAB_ID=${CMUX_TAB_ID:-}"
+  -e "CMUX_WINDOW_ID=${CMUX_WINDOW_ID:-}"
+)
+
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
-  echo "usage: $(basename "$0") <agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|codegraph|clipboard-bridge|bash> [args...]" >&2
+  echo "usage: $(basename "$0") <agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]" >&2
   exit 1
 fi
 shift
 
 case "$cmd" in
-  agent|cursor-agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|codegraph|clipboard-bridge|bash) ;;
+  agent|cursor-agent|pi|claude|claudex|cliproxy-login|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash) ;;
   *)
-    echo "unknown command: $cmd (expected agent, pi, claude, claudex, cliproxy-login, hermes, hermes-setup, codegraph, clipboard-bridge, or bash)" >&2
+    echo "unknown command: $cmd (expected agent, pi, claude, claudex, cliproxy-login, hermes, hermes-setup, codegraph, clipboard-bridge, gpu-bridge, cmux-bridge, or bash)" >&2
     exit 1
     ;;
 esac
@@ -129,6 +150,20 @@ esac
 # Host clipboard bridge (not inside the container)
 if [[ "$cmd" == "clipboard-bridge" ]]; then
   exec "$AGENTS_DIR/clipboard-bridge.sh" "$@"
+fi
+
+# Host GPU bridge — Blender/Godot with Metal (opt-in; not auto-started)
+if [[ "$cmd" == "gpu-bridge" ]]; then
+  mkdir -p "$AGENTS_DIR/data/gpu/jobs" "$AGENTS_DIR/data/gpu/running" \
+    "$AGENTS_DIR/data/gpu/results" "$AGENTS_DIR/data/gpu/logs"
+  exec "$AGENTS_DIR/gpu-bridge.sh" "$@"
+fi
+
+# Host cmux bridge — notifications/sounds (auto-started with agent/claude)
+if [[ "$cmd" == "cmux-bridge" ]]; then
+  mkdir -p "$AGENTS_DIR/data/cmux/jobs" "$AGENTS_DIR/data/cmux/running" \
+    "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs"
+  exec "$AGENTS_DIR/cmux-bridge.sh" "$@"
 fi
 
 # Same-path mount: host cwd under HOST_PROJECTS is identical in container
@@ -154,8 +189,11 @@ if [[ "$cmd" == "claudex" ]]; then
   fi
   ensure_services
   ensure_clipboard_bridge
+  ensure_cmux_bridge
   exec "${COMPOSE[@]}" exec -it -w "$workdir" \
     -e CLIPROXY_API_KEY="$CLIPROXY_API_KEY" \
+    -e "DISPLAY=${DISPLAY:-:0}" \
+    "${CMUX_DOCKER_ENV[@]}" \
     "$SERVICE" claudex "$@"
 fi
 
@@ -192,15 +230,17 @@ if ! docker ps --format '{{.Names}}' | grep -qx agents; then
 fi
 
 # Screenshot paste: host bridge → xclip/wl-paste stubs (Claude + Cursor CLI).
+# cmux notifications: host cmux-bridge → container `cmux` stub.
 # DISPLAY=:0 is a no-op for Claude; Cursor only probes clipboard when DISPLAY is set.
-# (Avoid empty "${arr[@]}" under macOS bash 3.2 + set -u.)
 case "$cmd" in
   claude|agent|cursor-agent)
     ensure_clipboard_bridge
+    ensure_cmux_bridge
     exec "${COMPOSE[@]}" exec -it -w "$workdir" \
       -e "DISPLAY=${DISPLAY:-:0}" \
+      "${CMUX_DOCKER_ENV[@]}" \
       "$SERVICE" "$cmd" "$@"
     ;;
 esac
 
-exec "${COMPOSE[@]}" exec -it -w "$workdir" "$SERVICE" "$cmd" "$@"
+exec "${COMPOSE[@]}" exec -it -w "$workdir" "${CMUX_DOCKER_ENV[@]}" "$SERVICE" "$cmd" "$@"

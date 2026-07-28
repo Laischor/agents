@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# Submit / wait for host GPU jobs (Blender/Godot via gpu-bridge.sh on macOS).
+# Usage:
+#   gpu-job run blender|--godot -- [args...]
+#   gpu-job submit <blender|godot> -- [args...]
+#   gpu-job wait <job-id>
+#   gpu-job status
+
+set -euo pipefail
+
+GPU_DIR="${AGENTS_GPU_DIR:-/var/agents-gpu}"
+JOBS_DIR="$GPU_DIR/jobs"
+RESULTS_DIR="$GPU_DIR/results"
+LOGS_DIR="$GPU_DIR/logs"
+HEARTBEAT="$GPU_DIR/bridge.heartbeat"
+POLL="${GPU_JOB_POLL:-0.4}"
+WAIT_TIMEOUT="${GPU_JOB_WAIT_TIMEOUT:-7200}"
+DEFAULT_JOB_TIMEOUT="${GPU_JOB_TIMEOUT:-600}"
+
+log() { printf '%s\n' "$*" >&2; }
+
+usage() {
+  cat <<EOF
+Usage: gpu-job <run|submit|wait|status> ...
+
+  gpu-job run <blender|godot> -- [args...]
+  gpu-job submit <blender|godot> -- [args...]
+  gpu-job wait <job-id>
+  gpu-job status
+
+Queue dir: $GPU_DIR
+Host daemon (opt-in): agents gpu-bridge --daemon
+EOF
+}
+
+bridge_alive() {
+  [[ -f "$HEARTBEAT" ]] || return 1
+  python3 - "$HEARTBEAT" <<'PY'
+import os, sys, time
+path = sys.argv[1]
+try:
+    age = time.time() - os.path.getmtime(path)
+except OSError:
+    sys.exit(1)
+sys.exit(0 if age < 10 else 1)
+PY
+}
+
+ensure_queue() {
+  mkdir -p "$JOBS_DIR" "$RESULTS_DIR" "$LOGS_DIR"
+}
+
+submit_job() {
+  local tool="$1"
+  shift
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+  ensure_queue
+  if ! bridge_alive; then
+    log "warning: gpu-bridge heartbeat missing/stale — start on host: agents gpu-bridge --daemon"
+  fi
+  local cwd="${GPU_JOB_CWD:-${PWD:-/}}"
+  # Hermes sandbox uses /workspace; prefer host-identical path when available
+  if [[ "$cwd" == /workspace || "$cwd" == /workspace/* ]]; then
+    if [[ -n "${HOST_PROJECTS:-}" && -d "${HOST_PROJECTS}" ]]; then
+      local rel="${cwd#/workspace}"
+      rel="${rel#/}"
+      if [[ -n "$rel" ]]; then
+        cwd="${HOST_PROJECTS}/${rel}"
+      else
+        cwd="${HOST_PROJECTS}"
+      fi
+    else
+      log "error: cwd is /workspace but HOST_PROJECTS is unset — cd to a path under HOST_PROJECTS or set GPU_JOB_CWD"
+      exit 1
+    fi
+  fi
+  local id
+  id="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+
+  python3 - "$JOBS_DIR" "$id" "$tool" "$cwd" "$DEFAULT_JOB_TIMEOUT" "$@" <<'PY'
+import json, os, sys, time
+jobs_dir, jid, tool, cwd, timeout = sys.argv[1:6]
+args = sys.argv[6:]
+job = {
+    "id": jid,
+    "tool": tool,
+    "args": args,
+    "cwd": cwd,
+    "timeout_sec": int(timeout),
+    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+}
+dest = os.path.join(jobs_dir, f"{jid}.json")
+tmp = dest + ".tmp"
+os.makedirs(jobs_dir, exist_ok=True)
+with open(tmp, "w") as fh:
+    json.dump(job, fh)
+    fh.write("\n")
+os.replace(tmp, dest)
+print(jid)
+PY
+}
+
+wait_job() {
+  local id="$1"
+  local result="$RESULTS_DIR/$id.json"
+  local elapsed=0
+  local max
+  max="$(python3 -c "print(int(float('$WAIT_TIMEOUT')))")"
+
+  while [[ ! -f "$result" ]]; do
+    if (( elapsed >= max )); then
+      log "error: timed out waiting for job $id (${WAIT_TIMEOUT}s) — is gpu-bridge running?"
+      exit 1
+    fi
+    if (( elapsed == 0 || elapsed % 30 == 0 )) && ! bridge_alive; then
+      log "warning: gpu-bridge heartbeat missing/stale — start on host: agents gpu-bridge --daemon"
+    fi
+    sleep "$POLL"
+    elapsed="$(python3 -c "print(int($elapsed + float('$POLL')))")"
+  done
+
+  python3 - "$result" <<'PY'
+import json, sys, os
+path = sys.argv[1]
+with open(path) as fh:
+    r = json.load(fh)
+stdout_f = r.get("stdout_path") or ""
+stderr_f = r.get("stderr_path") or ""
+# Paths are host paths; same mount layout under HOST_PROJECTS / AGENTS_DIR.
+# Prefer queue-local logs if host path is invisible in container.
+jid = r.get("id") or ""
+gpu = os.environ.get("AGENTS_GPU_DIR", "/var/agents-gpu")
+alt_out = os.path.join(gpu, "logs", f"{jid}.stdout")
+alt_err = os.path.join(gpu, "logs", f"{jid}.stderr")
+if not os.path.isfile(stdout_f):
+    stdout_f = alt_out
+if not os.path.isfile(stderr_f):
+    stderr_f = alt_err
+if os.path.isfile(stdout_f) and os.path.getsize(stdout_f):
+    sys.stdout.buffer.write(open(stdout_f, "rb").read())
+if os.path.isfile(stderr_f) and os.path.getsize(stderr_f):
+    sys.stderr.buffer.write(open(stderr_f, "rb").read())
+err = r.get("error")
+if err:
+    print(f"gpu-job: {err}", file=sys.stderr)
+code = int(r.get("exit_code") or 1)
+status = r.get("status") or "error"
+if status == "timeout" and code == 0:
+    code = 124
+sys.exit(code)
+PY
+}
+
+cmd="${1:-}"
+if [[ -z "$cmd" || "$cmd" == "-h" || "$cmd" == "--help" ]]; then
+  usage
+  exit 0
+fi
+shift
+
+case "$cmd" in
+  status)
+    ensure_queue
+    if bridge_alive; then
+      printf 'bridge=alive queue=%s\n' "$GPU_DIR"
+      exit 0
+    fi
+    printf 'bridge=down queue=%s (start: agents gpu-bridge --daemon)\n' "$GPU_DIR"
+    exit 1
+    ;;
+  submit)
+    tool="${1:-}"
+    [[ -n "$tool" ]] || { log "error: tool required (blender|godot)"; exit 1; }
+    shift
+    case "$tool" in
+      blender|godot) ;;
+      *) log "error: tool must be blender or godot"; exit 1 ;;
+    esac
+    submit_job "$tool" "$@"
+    ;;
+  run)
+    tool="${1:-}"
+    [[ -n "$tool" ]] || { log "error: tool required (blender|godot)"; exit 1; }
+    shift
+    case "$tool" in
+      blender|godot) ;;
+      *) log "error: tool must be blender or godot"; exit 1 ;;
+    esac
+    id="$(submit_job "$tool" "$@")"
+    log "gpu-job $id ($tool) submitted — waiting"
+    wait_job "$id"
+    ;;
+  wait)
+    id="${1:-}"
+    [[ -n "$id" ]] || { log "error: job id required"; exit 1; }
+    wait_job "$id"
+    ;;
+  *)
+    log "unknown command: $cmd"
+    usage >&2
+    exit 1
+    ;;
+esac

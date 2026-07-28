@@ -47,11 +47,11 @@ services:
       TERMINAL_DOCKER_IMAGE: agents:local
       TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "true"
       TERMINAL_CONTAINER_PERSISTENT: "true"
-      TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","CLIPROXY_API_KEY","GH_TOKEN","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR"]'
+      TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","CLIPROXY_API_KEY","GH_TOKEN","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR","AGENTS_GPU_DIR","AGENTS_CMUX_DIR","HOST_PROJECTS","CMUX_WORKSPACE_ID","CMUX_SURFACE_ID","CMUX_TAB_ID","CMUX_WINDOW_ID"]'
       # DISPLAY=:0 → Cursor CLI will call xclip stubs (no real X11 needed)
-      TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard","DISPLAY":":0"}'
+      TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard","AGENTS_GPU_DIR":"/var/agents-gpu","AGENTS_CMUX_DIR":"/var/agents-cmux","DISPLAY":":0"}'
       # Host-absolute bind mounts (compose interpolates before the container sees them)
-      TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${HOME}/.gitconfig:/etc/gitconfig.host:ro","${HOME}/.ssh:/root/.ssh:ro","${HOME}/.config/gh:/root/.config/gh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
+      TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${AGENTS_DIR}/data/gpu:/var/agents-gpu","${AGENTS_DIR}/data/cmux:/var/agents-cmux","${HOME}/.gitconfig:/etc/gitconfig.host:ro","${HOME}/.ssh:/root/.ssh:ro","${HOME}/.config/gh:/root/.config/gh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
     volumes:
       - ./data/hermes:/opt/data
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
@@ -111,6 +111,10 @@ services:
       CAVEMAN_DEFAULT_MODE: ultra
       # Host clipboard-bridge.sh → stubs (xclip/wl-paste) for screenshot paste
       AGENTS_CLIPBOARD_DIR: /var/agents-clipboard
+      # Host gpu-bridge.sh → blender/godot shims (Metal on macOS)
+      AGENTS_GPU_DIR: /var/agents-gpu
+      # Host cmux-bridge.sh → cmux stub (notifications / sounds)
+      AGENTS_CMUX_DIR: /var/agents-cmux
       # Dummy display so Cursor CLI enables linux clipboard image paste (xclip stubs)
       DISPLAY: ":0"
     volumes:
@@ -130,5 +134,9 @@ services:
       - ./data/claude:/root/.claude
       # macOS clipboard bridge drop dir (PNG for Claude/Cursor Ctrl+V paste)
       - ./data/clipboard:/var/agents-clipboard
+      # macOS GPU job queue (Blender/Godot via gpu-bridge.sh)
+      - ./data/gpu:/var/agents-gpu
+      # macOS cmux notification queue (cmux-bridge.sh)
+      - ./data/cmux:/var/agents-cmux
     # Keep the container running for interactive exec
     command: ["sleep", "infinity"]

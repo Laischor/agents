@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Container shim → host Godot via gpu-bridge (Metal on macOS).
+set -euo pipefail
+exec gpu-job run godot -- "$@"

@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# Container shim → host cmux via cmux-bridge.sh (notifications / hooks / sounds).
+# Usage: cmux <args...>   (stdin forwarded; same CLI surface as host cmux for allowlisted cmds)
+
+set -euo pipefail
+
+CMUX_DIR="${AGENTS_CMUX_DIR:-/var/agents-cmux}"
+JOBS_DIR="$CMUX_DIR/jobs"
+RESULTS_DIR="$CMUX_DIR/results"
+HEARTBEAT="$CMUX_DIR/bridge.heartbeat"
+POLL="${CMUX_JOB_POLL:-0.2}"
+WAIT_TIMEOUT="${CMUX_JOB_WAIT_TIMEOUT:-20}"
+DEFAULT_JOB_TIMEOUT="${CMUX_JOB_TIMEOUT:-15}"
+
+log() { printf '%s\n' "$*" >&2; }
+
+bridge_alive() {
+  [[ -f "$HEARTBEAT" ]] || return 1
+  python3 - "$HEARTBEAT" <<'PY'
+import os, sys, time
+path = sys.argv[1]
+try:
+    age = time.time() - os.path.getmtime(path)
+except OSError:
+    sys.exit(1)
+sys.exit(0 if age < 10 else 1)
+PY
+}
+
+# OSC 777 reaches cmux through the docker exec PTY (hook stdout is captured).
+emit_osc_fallback() {
+  local title="$1"
+  local body="$2"
+  local seq tty
+  # Strip OSC-breaking chars
+  title="${title//$'\a'/}"
+  title="${title//$'\033'/}"
+  body="${body//$'\a'/}"
+  body="${body//$'\033'/}"
+  seq=$(printf '\033]777;notify;%s;%s\007' "$title" "$body")
+  for tty in /dev/tty "${SSH_TTY:-}"; do
+    [[ -n "$tty" ]] || continue
+    if { printf '%s' "$seq" >"$tty"; } 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+maybe_osc_from_argv() {
+  # Best-effort ring/sound if the host bridge/socket is down.
+  local title="Agent" body="needs attention"
+  case "${1:-}" in
+    notify)
+      shift || true
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --title) title="${2:-}"; shift 2 || true ;;
+          --subtitle) shift 2 || true ;;
+          --body) body="${2:-}"; shift 2 || true ;;
+          -*) shift || true ;;
+          *) body="$1"; shift || true ;;
+        esac
+      done
+      emit_osc_fallback "$title" "$body" || true
+      ;;
+    claude-hook|cursor-hook)
+      case "${2:-}" in
+        notification|stop|agent-response) emit_osc_fallback "Agent" "${2}" || true ;;
+      esac
+      ;;
+    hooks)
+      case "${3:-}" in
+        notification|stop|agent-response|push-notification)
+          emit_osc_fallback "${2:-Agent}" "${3}" || true
+          ;;
+      esac
+      ;;
+  esac
+}
+
+submit_and_wait() {
+  mkdir -p "$JOBS_DIR" "$RESULTS_DIR"
+
+  local id stdin_b64
+  id="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+
+  # Capture stdin (hooks pipe JSON). Empty when no pipe.
+  if [[ -t 0 ]]; then
+    stdin_b64=""
+  else
+    stdin_b64="$(python3 -c 'import sys,base64; print(base64.b64encode(sys.stdin.buffer.read()).decode())')"
+  fi
+
+  python3 - "$JOBS_DIR" "$id" "$DEFAULT_JOB_TIMEOUT" "$stdin_b64" "$@" <<'PY'
+import json, os, sys, time
+jobs_dir, jid, timeout, stdin_b64 = sys.argv[1:5]
+argv = sys.argv[5:]
+env = {}
+for key in (
+    "CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "CMUX_TAB_ID", "CMUX_WINDOW_ID",
+    "CMUX_SOCKET_PATH", "TERM_PROGRAM", "TERM",
+):
+    val = os.environ.get(key)
+    if val:
+        env[key] = val
+job = {
+    "id": jid,
+    "argv": argv,
+    "stdin_b64": stdin_b64,
+    "env": env,
+    "timeout_sec": float(timeout),
+    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+}
+dest = os.path.join(jobs_dir, f"{jid}.json")
+tmp = dest + ".tmp"
+os.makedirs(jobs_dir, exist_ok=True)
+with open(tmp, "w") as fh:
+    json.dump(job, fh)
+    fh.write("\n")
+os.replace(tmp, dest)
+PY
+
+  local result="$RESULTS_DIR/$id.json"
+  local deadline
+  deadline="$(python3 -c "import time; print(time.time() + float('$WAIT_TIMEOUT'))")"
+
+  while [[ ! -f "$result" ]]; do
+    if python3 -c "import time,sys; sys.exit(0 if time.time() >= float('$deadline') else 1)"; then
+      log "error: timed out waiting for cmux job $id — is cmux-bridge running? (agents cmux-bridge --daemon)"
+      return 1
+    fi
+    sleep "$POLL"
+  done
+
+  python3 - "$result" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    r = json.load(fh)
+sys.stdout.write(r.get("stdout") or "")
+err = r.get("stderr") or ""
+if err:
+    sys.stderr.write(err if err.endswith("\n") else err + "\n")
+extra = r.get("error")
+if extra:
+    print(f"cmux-bridge: {extra}", file=sys.stderr)
+code = int(r.get("exit_code") or 1)
+status = r.get("status") or "error"
+if status == "timeout" and code == 0:
+    code = 124
+sys.exit(code)
+PY
+}
+
+if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
+  cat <<EOF
+cmux (agents container stub)
+
+Forwards allowlisted commands to the host cmux app via cmux-bridge.
+Queue: $CMUX_DIR
+
+Host: agents cmux-bridge --daemon
+EOF
+  exit 0
+fi
+
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" || "${1:-}" == "version" ]]; then
+  echo "cmux (agents stub → host bridge)"
+  if bridge_alive; then
+    echo "bridge=alive"
+  else
+    echo "bridge=down (start: agents cmux-bridge --daemon)"
+  fi
+  exit 0
+fi
+
+if ! bridge_alive; then
+  log "warning: cmux-bridge heartbeat missing/stale — OSC fallback only; start: agents cmux-bridge --daemon"
+  maybe_osc_from_argv "$@"
+  exit 0
+fi
+
+if submit_and_wait "$@"; then
+  exit 0
+fi
+
+# Bridge failed / timed out → still try OSC so the pane rings.
+# Exit 0 so agent hooks do not surface a hard failure.
+maybe_osc_from_argv "$@"
+exit 0
