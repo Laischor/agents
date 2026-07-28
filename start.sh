@@ -124,7 +124,9 @@ ensure_data_dirs() {
   # Host gh config mount — ensure dir exists so Docker does not create a file
   if [[ ! -d "${HOME}/.config/gh" ]]; then
     mkdir -p "${HOME}/.config/gh"
-    log "Hinweis: ~/.config/gh war leer — auf dem Host 'gh auth login' ausführen."
+    if command -v gh >/dev/null 2>&1; then
+      log "Hinweis: ~/.config/gh war leer — auf dem Host 'gh auth login' ausführen."
+    fi
   fi
   # Legacy empty file mount blocked Claude auth writes — remove if present
   if [[ -f "$AGENTS_DIR/data/claude.json" ]]; then
@@ -134,21 +136,27 @@ ensure_data_dirs() {
 
 # macOS Keychain holds the gh OAuth token; ~/.config/gh has no oauth_token.
 # Export GH_TOKEN so compose can inject it into the Linux container.
+# gh is optional — missing binary is silent; only warn when installed but logged out.
 ensure_gh_token() {
   if [[ -n "${GH_TOKEN:-}" ]]; then
     export GH_TOKEN
-    return
+    return 0
   fi
   if ! command -v gh >/dev/null 2>&1; then
-    log "Hinweis: gh fehlt auf dem Host — Container bekommt keinen GH_TOKEN (Keychain)."
-    return
+    return 0
   fi
   local token
   if token="$(gh auth token 2>/dev/null)" && [[ -n "$token" ]]; then
     export GH_TOKEN="$token"
-    log "GH_TOKEN aus Host-Keychain (gh auth token) für den Container gesetzt."
+    if [[ -z "${_AGENTS_GH_TOKEN_LOGGED:-}" ]]; then
+      log "GH_TOKEN aus Host-Keychain (gh auth token) für den Container gesetzt."
+      _AGENTS_GH_TOKEN_LOGGED=1
+    fi
   else
-    log "Hinweis: gh nicht eingeloggt — 'gh auth login' auf dem Host, oder GH_TOKEN in .env."
+    if [[ -z "${_AGENTS_GH_TOKEN_WARNED:-}" ]]; then
+      log "Hinweis: gh nicht eingeloggt — 'gh auth login' auf dem Host, oder GH_TOKEN in .env."
+      _AGENTS_GH_TOKEN_WARNED=1
+    fi
   fi
 }
 
