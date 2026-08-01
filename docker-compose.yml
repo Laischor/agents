@@ -42,6 +42,8 @@ services:
       HOST_PROJECTS: ${HOST_PROJECTS}
       AGENTS_DIR: ${AGENTS_DIR}
       HOST_HOME: ${HOME}
+      # Image default is /opt/data only — also allow write_file/patch under mounted projects
+      HERMES_WRITE_SAFE_ROOT: /opt/data:${HOST_PROJECTS}
       # Drive host Docker from inside hermes (sandbox = agents:local)
       TERMINAL_ENV: docker
       TERMINAL_DOCKER_IMAGE: agents:local
