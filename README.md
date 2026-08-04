@@ -1,7 +1,7 @@
 # agents
 
 Docker environment for coding agents: **Cursor CLI**, **Pi**, and **Claude Code**.  
-Also included: **Claudex** (Claude Code + GPT-5.6 Sol via CLIProxyAPI), optional **Hermes Agent**, **Caveman**, and **CodeGraph**.  
+Also included: optional **Hermes Agent**, **Caveman**, and **CodeGraph**.  
 Projects stay on the host; agents run isolated in the container and drive Docker through the host socket.
 
 ## Requirements
@@ -9,7 +9,6 @@ Projects stay on the host; agents run isolated in the container and drive Docker
 - macOS
 - Homebrew ([brew.sh](https://brew.sh)) — for automatic Docker/Colima installation
 - SSH key / login for the respective agent accounts (or API keys)
-- For Claudex: ChatGPT Plus/Pro with Codex access
 
 ## Setup
 
@@ -19,7 +18,7 @@ cd agents
 ./start.sh
 ```
 
-`start.sh` checks for macOS, prepares Docker (installs `colima`, `docker`, and `docker-compose` via Homebrew if needed and starts Colima), and brings up `agents` + `cli-proxy-api`. If `CLIPROXY_API_KEY` is missing, it is generated and written to `.env` and `data/cliproxy/config.yaml`.
+`start.sh` checks for macOS, prepares Docker (installs `colima`, `docker`, and `docker-compose` via Homebrew if needed and starts Colima), and brings up the `agents` container.
 
 Then adjust `.env` if you have not already:
 
@@ -31,7 +30,6 @@ CURSOR_API_KEY=
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 GOOGLE_API_KEY=
-CLIPROXY_API_KEY=   # optional — start.sh creates one
 HERMES=0            # set to 1 to start the Hermes Agent container
 ```
 
@@ -45,7 +43,6 @@ agents() { "$AGENTS_DIR/run.sh" "$@"; }
 dagent()     { agents agent "$@"; }
 dpi()        { agents pi "$@"; }
 dclaude()    { agents claude "$@"; }
-dclaudex()   { agents claudex "$@"; }
 dhermes()    { agents hermes "$@"; }
 dcodegraph() { agents codegraph "$@"; }
 agents-shell() { agents bash "$@"; }
@@ -64,7 +61,6 @@ cd ~/Documents/projects/my-project
 dagent       # Cursor CLI
 dpi          # Pi
 dclaude      # Claude Code (Anthropic)
-dclaudex     # Claude Code harness → GPT-5.6 Sol (Claudex)
 dhermes      # Hermes Agent CLI (requires HERMES=1)
 dcodegraph   # CodeGraph CLI
 agents-shell
@@ -84,7 +80,7 @@ Git in the container uses `/etc/gitconfig` for `safe.directory *` and `credentia
 
 Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PNGs into `data/clipboard/`; stubs for `xclip` / `wl-paste` inside the container serve them to Claude Code and the Cursor CLI (`agent`).
 
-- Starts automatically with `dagent` / `dclaude` / `dclaudex` (or: `agents clipboard-bridge --daemon`)
+- Starts automatically with `dagent` / `dclaude` (or: `agents clipboard-bridge --daemon`)
 - Copy a screenshot to the clipboard, then paste with **Ctrl+V** (not Cmd+V)
 - Cursor needs a dummy `DISPLAY` (set in Compose / `run.sh`) so it will call the stubs
 - Status / stop: `agents clipboard-bridge --status` · `agents clipboard-bridge --stop`
@@ -97,7 +93,7 @@ Docker cannot use the host cmux control socket without opening it to every local
 2. Container `cmux notify` / agent hooks enqueue a job in `data/cmux/`
 3. The host daemon writes **OSC 777** to that TTY (pane ring + desktop notification) and plays **afplay**
 
-- Starts automatically with `dagent` / `dclaude` / `dclaudex` (or: `agents cmux-bridge --daemon`)
+- Starts automatically with `dagent` / `dclaude` (or: `agents cmux-bridge --daemon`)
 - Container stub: `cmux` / `cmux-agent-hook` (Claude `Notification`/`Stop`, Cursor `stop`/`afterAgentResponse`)
 - Forwards `CMUX_WORKSPACE_ID` / `CMUX_SURFACE_ID` for per-pane session routing
 - Stop hooks always notify (cmux `hooks … stop` alone only updates sidebar state)
@@ -175,29 +171,7 @@ Gateway API listens on `localhost:8642`; web dashboard on `localhost:9119` (enab
 
 ### Terminal sandbox (`agents:local`)
 
-Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), **Pi**, **`claudex`**, and **`gh`** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, `~/.config/gh`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
-
-`claudex` is a shim in the image (`/usr/local/bin/claudex`): Claude Code → CLIProxyAPI → GPT-5.6 Sol. It picks `cli-proxy-api:8317` on the Compose network, otherwise `host.docker.internal:8317` (Hermes sandbox). Needs `CLIPROXY_API_KEY` and a logged-in proxy (`agents cliproxy-login`).
-
-## Claudex (GPT-5.6 Sol)
-
-Claude Code as the harness, inference via **CLIProxyAPI** → ChatGPT Codex (OAuth). `dclaude` stays on Anthropic unchanged; the proxy env applies only to `dclaudex`.
-
-Log in to ChatGPT/Codex once (prints a URL; callback on `localhost:54545`):
-
-```bash
-agents cliproxy-login
-```
-
-Then:
-
-```bash
-cd ~/Documents/projects/my-project
-dclaudex
-# In the session: /status  → model gpt-5.6-sol, base URL proxy
-```
-
-Note: Routing subscription OAuth through a third-party proxy may violate provider terms and carries account/credential risk. Run it locally and do not share credentials.
+Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), **Pi**, and **`gh`** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, `~/.config/gh`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
 
 ## Persistence
 
@@ -215,7 +189,6 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 | `data/clipboard/`      | `/var/agents-clipboard` (host PNG bridge for Claude/Cursor paste) |
 | `data/gpu/`            | `/var/agents-gpu` (host Blender/Godot job queue via gpu-bridge) |
 | `data/cmux/`           | `/var/agents-cmux` (host cmux notify/hooks queue via cmux-bridge) |
-| `data/cliproxy/`       | CLIProxyAPI config + OAuth (`auths/`) |
 | `data/hermes/`         | Hermes Agent config / sessions (`/opt/data`) |
 
 `data/` and `.env` are gitignored.

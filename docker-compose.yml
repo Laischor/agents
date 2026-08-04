@@ -1,15 +1,4 @@
 services:
-  cli-proxy-api:
-    image: eceasy/cli-proxy-api:latest
-    container_name: cli-proxy-api
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8317:8317"     # Anthropic-compatible API
-      - "127.0.0.1:54545:54545"   # Codex / ChatGPT OAuth callback
-    volumes:
-      - ./data/cliproxy/config.yaml:/CLIProxyAPI/config.yaml
-      - ./data/cliproxy/auths:/root/.cli-proxy-api
-
   # Opt-in: set HERMES=1 in .env (compose profile "hermes")
   # Terminal backend = docker → agents:local (claude / agent / pi available there).
   # AGENTS_DIR must be absolute in .env (start.sh / run.sh write it automatically).
@@ -34,7 +23,6 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}
-      CLIPROXY_API_KEY: ${CLIPROXY_API_KEY:-}
       # Compose-network URL — Hermes web_search backend (search_backend: searxng)
       SEARXNG_URL: http://searxng:8080
       # macOS: gh stores OAuth in Keychain — start.sh/run.sh inject via `gh auth token`
@@ -49,7 +37,7 @@ services:
       TERMINAL_DOCKER_IMAGE: agents:local
       TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "true"
       TERMINAL_CONTAINER_PERSISTENT: "true"
-      TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","CLIPROXY_API_KEY","GH_TOKEN","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR","AGENTS_GPU_DIR","AGENTS_CMUX_DIR","HOST_PROJECTS","CMUX_WORKSPACE_ID","CMUX_SURFACE_ID","CMUX_TAB_ID","CMUX_WINDOW_ID"]'
+      TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","GH_TOKEN","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR","AGENTS_GPU_DIR","AGENTS_CMUX_DIR","HOST_PROJECTS","CMUX_WORKSPACE_ID","CMUX_SURFACE_ID","CMUX_TAB_ID","CMUX_WINDOW_ID"]'
       # DISPLAY=:0 → Cursor CLI will call xclip stubs (no real X11 needed)
       TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard","AGENTS_GPU_DIR":"/var/agents-gpu","AGENTS_CMUX_DIR":"/var/agents-cmux","DISPLAY":":0"}'
       # Host-absolute bind mounts (compose interpolates before the container sees them)
@@ -93,8 +81,6 @@ services:
     init: true
     # Hard cap so thrash/OOM cannot freeze the whole long-lived container
     mem_limit: 3g
-    depends_on:
-      - cli-proxy-api
     environment:
       # Cursor CLI
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}
@@ -102,8 +88,6 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      # Claudex (CLIProxyAPI) — used by /usr/local/bin/claudex
-      CLIPROXY_API_KEY: ${CLIPROXY_API_KEY:-}
       # GitHub CLI — Keychain on macOS is not visible in Linux; inject at compose time
       GH_TOKEN: ${GH_TOKEN:-}
       # Keep Claude auth/config under one mounted dir (survives rebuild)

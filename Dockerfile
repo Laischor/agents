@@ -102,13 +102,12 @@ ENV AGENTS_CLIPBOARD_DIR=/var/agents-clipboard \
     AGENTS_GPU_DIR=/var/agents-gpu \
     AGENTS_CMUX_DIR=/var/agents-cmux
 COPY clipboard/xclip clipboard/wl-paste /usr/local/bin/
-COPY bin/claudex /usr/local/bin/claudex
 COPY bin/agents-janitor.sh /usr/local/bin/agents-janitor
 # Host GPU bridge shims (Blender/Godot run on macOS via gpu-bridge.sh)
 COPY bin/gpu-job bin/blender bin/godot /usr/local/bin/
 # Host cmux bridge stub (notifications/sounds via cmux-bridge.sh on macOS)
 COPY bin/cmux bin/cmux-agent-hook /usr/local/bin/
-RUN chmod +x /usr/local/bin/xclip /usr/local/bin/wl-paste /usr/local/bin/claudex \
+RUN chmod +x /usr/local/bin/xclip /usr/local/bin/wl-paste \
       /usr/local/bin/agents-janitor \
       /usr/local/bin/gpu-job /usr/local/bin/blender /usr/local/bin/godot \
       /usr/local/bin/cmux /usr/local/bin/cmux-agent-hook \
