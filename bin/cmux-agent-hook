@@ -5,7 +5,7 @@
 #
 # Always `cmux notify` — bridge delivers OSC to the registered host TTY + afplay.
 # (cmux `hooks … stop` alone only updates sidebar state, no desktop alert.)
-
+# Cursor: wire only the `stop` event (not afterAgentResponse) — both fire per turn.
 set -euo pipefail
 
 agent="${1:-}"

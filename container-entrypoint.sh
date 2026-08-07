@@ -217,21 +217,19 @@ path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 }
 
-# Wire Cursor stop/afterAgentResponse → cmux stub.
+# Wire Cursor stop → cmux stub (same “done” signal as Claude Stop).
+# Do NOT also hook afterAgentResponse — Cursor fires both per turn, which
+# double-notifies (body snippet + "completed") and feels like 3–4 rings with OSC+sound.
 ensure_cursor_cmux_hooks() {
   local hooks_json="${HOME}/.cursor/hooks.json"
   mkdir -p "${HOME}/.cursor"
-
-  if [[ -f "$hooks_json" ]] && grep -Fq 'cmux-agent-hook' "$hooks_json" 2>/dev/null; then
-    return
-  fi
 
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'warning: python3 missing; skip cmux Cursor hooks\n' >&2
     return
   fi
 
-  printf 'Configuring Cursor hooks: cmux notifications\n'
+  # Always reconcile: add stop if missing, drop afterAgentResponse duplicates.
   CURSOR_HOOKS="$hooks_json" python3 - <<'PY'
 import json, os
 from pathlib import Path
@@ -249,22 +247,29 @@ if "version" not in data:
 
 hooks = data.setdefault("hooks", {})
 marker = "cmux-agent-hook"
+stop_cmd = "cmux-agent-hook cursor stop"
+
+def entry_cmd(entry) -> str:
+    if isinstance(entry, dict):
+        return str(entry.get("command") or "")
+    return str(entry or "")
 
 def has_marker(event: str) -> bool:
-    for entry in hooks.get(event) or []:
-        if isinstance(entry, dict) and marker in str(entry.get("command") or ""):
-            return True
-        if isinstance(entry, str) and marker in entry:
-            return True
-    return False
+    return any(marker in entry_cmd(e) for e in (hooks.get(event) or []))
 
-def add(event: str, cmd: str):
-    if has_marker(event):
-        return
-    hooks.setdefault(event, []).append({"command": cmd})
+# Remove legacy afterAgentResponse hooks we installed (caused multi-fire).
+aar = hooks.get("afterAgentResponse") or []
+if aar:
+    pruned = [e for e in aar if marker not in entry_cmd(e)]
+    if pruned:
+        hooks["afterAgentResponse"] = pruned
+    else:
+        hooks.pop("afterAgentResponse", None)
 
-add("stop", "cmux-agent-hook cursor stop")
-add("afterAgentResponse", "cmux-agent-hook cursor agent-response")
+if not has_marker("stop"):
+    print("Configuring Cursor hooks: cmux notifications (stop only)", flush=True)
+    hooks.setdefault("stop", []).append({"command": stop_cmd})
+
 path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 }

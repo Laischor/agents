@@ -21,6 +21,11 @@ services:
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USER:-admin}
       HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_PASSWORD:-}
       HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${HERMES_DASHBOARD_SECRET:-}
+      # OpenAI-compatible API on :8642 — required so WebUI can route chat through
+      # this gateway (tools/sandbox stay here, not in hermes-webui).
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: "0.0.0.0"
+      API_SERVER_KEY: ${HERMES_API_SERVER_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
@@ -57,10 +62,10 @@ services:
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
 
-  # Community WebUI chat (nesquena/hermes-webui) — shares data/hermes with gateway.
+  # Community WebUI as chat frontend. Chat is routed through the hermes gateway
+  # API (HERMES_WEBUI_CHAT_BACKEND=gateway) so tools/memory/cron/Docker sandbox
+  # stay on the gateway — not a second in-process agent (#681).
   # Dashboard stays on :9119 for config; use :8787 for webchat.
-  # Caveat (#681): tools started from WebUI chat run in this container, not in
-  # the hermes gateway / agents:local sandbox. Gateway CLI/cron keep the sandbox.
   hermes-webui:
     profiles: ["hermes"]
     image: ghcr.io/nesquena/hermes-webui:latest
@@ -77,12 +82,16 @@ services:
       HERMES_WEBUI_HOST: "0.0.0.0"
       HERMES_WEBUI_PORT: "8787"
       HERMES_WEBUI_STATE_DIR: /home/hermeswebui/.hermes/webui
-      # Agent source is mounted at /opt/hermes (not under ~/.hermes — nested mount fails)
+      # Agent source still needed for WebUI bootstrapping / non-chat panels
       HERMES_WEBUI_AGENT_DIR: /opt/hermes
-      # Same SearXNG as gateway — WebUI agent reads get_env_value/SEARXNG_URL
-      SEARXNG_URL: http://searxng:8080
-      # Gateway health / Tasks pill over the compose network
+      # Route browser chat through gateway (same tool path as Telegram/CLI)
+      HERMES_WEBUI_CHAT_BACKEND: gateway
+      HERMES_WEBUI_GATEWAY_BASE_URL: http://hermes:8642
+      HERMES_WEBUI_GATEWAY_API_KEY: ${HERMES_API_SERVER_KEY:-}
+      HERMES_WEBUI_GATEWAY_USE_RUNS_API: "true"
+      # Tasks / cron health probe (not chat routing)
       HERMES_API_URL: http://hermes:8642
+      SEARXNG_URL: http://searxng:8080
       # Must match HERMES_UID/GID and ownership of data/hermes (never 0 — init loops)
       WANTED_UID: ${HERMES_UID:-1000}
       WANTED_GID: ${HERMES_GID:-1000}
@@ -90,8 +99,7 @@ services:
     volumes:
       - ./data/hermes:/home/hermeswebui/.hermes
       # Mount beside home, NOT under it — nested mount into a 0700 bind mount fails
-      # with "permission denied" (securejoin) after chown 1000:1000. Init also
-      # probes /opt/hermes for agent source.
+      # with "permission denied" (securejoin) after chown to host UID.
       - hermes-agent-src:/opt/hermes:ro
       - ${HOST_PROJECTS}:/workspace
 
