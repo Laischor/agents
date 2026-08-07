@@ -167,7 +167,17 @@ agents hermes-setup
 dhermes
 ```
 
-Gateway API listens on `localhost:8642`; web dashboard on `localhost:9119` (enabled via `HERMES_DASHBOARD=1` in Compose). Docker requires basic auth — `./start.sh` writes `HERMES_DASHBOARD_USER` / `HERMES_DASHBOARD_PASSWORD` / `HERMES_DASHBOARD_SECRET` into `.env` if missing. State lives in `data/hermes/` (`/opt/data` in the container). `HERMES_WRITE_SAFE_ROOT` is `/opt/data:${HOST_PROJECTS}` so `write_file`/`patch` can touch Hermes state and the mounted project tree. Setting `HERMES=0` and running `./start.sh` again stops a previously running Hermes container.
+With `HERMES=1`, Compose starts the gateway, [Hermes WebUI](https://github.com/nesquena/hermes-webui) chat, and SearxNG:
+
+| Surface | URL | Role |
+|---------|-----|------|
+| **WebUI** | `http://127.0.0.1:8787` | Web chat (community UI) |
+| **Dashboard** | `http://127.0.0.1:9119` | Config / monitoring (`HERMES_DASHBOARD=1`) |
+| Gateway API | `localhost:8642` | Health / CLI / cron |
+
+Docker requires dashboard basic auth — `./start.sh` writes `HERMES_DASHBOARD_USER` / `HERMES_DASHBOARD_PASSWORD` / `HERMES_DASHBOARD_SECRET` into `.env` if missing. Optional `HERMES_WEBUI_PASSWORD` for the WebUI. State lives in `data/hermes/` (`/opt/data` in the gateway; same tree mounted into WebUI). `HERMES_WRITE_SAFE_ROOT` is `/opt/data:${HOST_PROJECTS}` so `write_file`/`patch` can touch Hermes state and the mounted project tree. Setting `HERMES=0` and running `./start.sh` again stops hermes, hermes-webui, and searxng.
+
+**Note:** Tools triggered from WebUI chat run inside the WebUI container (not the `agents:local` sandbox). Gateway CLI / cron keep the Docker sandbox.
 
 ### Terminal sandbox (`agents:local`)
 
@@ -189,7 +199,7 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 | `data/clipboard/`      | `/var/agents-clipboard` (host PNG bridge for Claude/Cursor paste) |
 | `data/gpu/`            | `/var/agents-gpu` (host Blender/Godot job queue via gpu-bridge) |
 | `data/cmux/`           | `/var/agents-cmux` (host cmux notify/hooks queue via cmux-bridge) |
-| `data/hermes/`         | Hermes Agent config / sessions (`/opt/data`) |
+| `data/hermes/`         | Hermes home: gateway `/opt/data`, WebUI `/home/hermeswebui/.hermes` |
 
 `data/` and `.env` are gitignored.
 
