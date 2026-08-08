@@ -39,7 +39,7 @@ services:
       AGENTS_DIR: ${AGENTS_DIR}
       HOST_HOME: ${HOME}
       # Image default is /opt/data only — also allow write_file/patch under mounted projects
-      HERMES_WRITE_SAFE_ROOT: /opt/data:${HOST_PROJECTS}
+      HERMES_WRITE_SAFE_ROOT: /opt/data:/tmp:${HOST_PROJECTS}
       # Align with hermes-webui on the shared data/hermes bind mount (must be non-root —
       # WebUI init loops forever if WANTED_UID=0 because whoami stays "root").
       # On macOS use your host id (often 501); start.sh writes HERMES_UID/GID if unset.
