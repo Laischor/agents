@@ -69,7 +69,7 @@ ensure_services() {
     "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs" \
     "$AGENTS_DIR/data/cmux/sessions"
   if hermes_enabled; then
-    mkdir -p "$AGENTS_DIR/data/hermes"
+    mkdir -p "$AGENTS_DIR/data/hermes" "$AGENTS_DIR/data/open-webui"
     "${COMPOSE[@]}" --profile hermes up -d --quiet-pull
   else
     "${COMPOSE[@]}" up -d --quiet-pull

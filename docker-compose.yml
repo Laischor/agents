@@ -2,7 +2,7 @@ services:
   # Opt-in: set HERMES=1 in .env (compose profile "hermes")
   # Terminal backend = docker → agents:local (claude / agent / pi available there).
   # AGENTS_DIR must be absolute in .env (start.sh / run.sh write it automatically).
-  # Split: gateway+dashboard (this service) for config/ops; hermes-webui for chat.
+  # Gateway+dashboard (:9119) for config/ops; Open WebUI (:3000) for chat.
   hermes:
     profiles: ["hermes"]
     image: nousresearch/hermes-agent:latest
@@ -21,8 +21,8 @@ services:
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USER:-admin}
       HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_PASSWORD:-}
       HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${HERMES_DASHBOARD_SECRET:-}
-      # OpenAI-compatible API on :8642 — required so WebUI can route chat through
-      # this gateway (tools/sandbox stay here, not in hermes-webui).
+      # OpenAI-compatible API on :8642 — Open WebUI routes chat through this
+      # gateway (tools/sandbox stay here, not in open-webui).
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: "0.0.0.0"
       API_SERVER_KEY: ${HERMES_API_SERVER_KEY:-}
@@ -31,7 +31,7 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}
       # Compose-network URL — Hermes web_search backend (search_backend: searxng)
-      # Also persisted in data/hermes/.env so WebUI / get_env_value see it.
+      # Also persisted in data/hermes/.env so get_env_value sees it.
       SEARXNG_URL: http://searxng:8080
       # macOS: gh stores OAuth in Keychain — start.sh/run.sh inject via `gh auth token`
       GH_TOKEN: ${GH_TOKEN:-}
@@ -40,9 +40,8 @@ services:
       HOST_HOME: ${HOME}
       # Image default is /opt/data only — also allow write_file/patch under mounted projects
       HERMES_WRITE_SAFE_ROOT: /opt/data:/tmp:${HOST_PROJECTS}
-      # Align with hermes-webui on the shared data/hermes bind mount (must be non-root —
-      # WebUI init loops forever if WANTED_UID=0 because whoami stays "root").
-      # On macOS use your host id (often 501); start.sh writes HERMES_UID/GID if unset.
+      # Non-root UID for data/hermes bind mount. On macOS use your host id (often 501);
+      # start.sh writes HERMES_UID/GID if unset.
       HERMES_UID: ${HERMES_UID:-1000}
       HERMES_GID: ${HERMES_GID:-1000}
       # Drive host Docker from inside hermes (sandbox = agents:local)
@@ -57,51 +56,31 @@ services:
       TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${AGENTS_DIR}/data/gpu:/var/agents-gpu","${AGENTS_DIR}/data/cmux:/var/agents-cmux","${HOME}/.gitconfig:/etc/gitconfig.host:ro","${HOME}/.ssh:/root/.ssh:ro","${HOME}/.config/gh:/root/.config/gh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
     volumes:
       - ./data/hermes:/opt/data
-      # Shared with hermes-webui so it can install agent Python deps at startup
-      - hermes-agent-src:/opt/hermes
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
 
-  # Community WebUI as chat frontend. Chat is routed through the hermes gateway
-  # API (HERMES_WEBUI_CHAT_BACKEND=gateway) so tools/memory/cron/Docker sandbox
-  # stay on the gateway — not a second in-process agent (#681).
-  # Dashboard stays on :9119 for config; use :8787 for webchat.
-  hermes-webui:
+  # Open WebUI as chat frontend. Talks to Hermes' OpenAI-compatible API
+  # (http://hermes:8642/v1) so tools/memory/cron/Docker sandbox stay on the
+  # gateway — Open WebUI is only the browser UI, not a second agent.
+  # Dashboard stays on :9119 for config; use :3000 for webchat.
+  # Official guide: https://hermes-agent.nousresearch.com/docs/user-guide/messaging/open-webui
+  open-webui:
     profiles: ["hermes"]
-    image: ghcr.io/nesquena/hermes-webui:latest
-    container_name: hermes-webui
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
     restart: unless-stopped
-    # Soft dependency only for first-time bring-up. Recreate webui alone with:
-    #   docker compose --profile hermes up -d --no-build --force-recreate hermes-webui
-    # (never include agents; avoid recreating hermes unless UID/env changed)
     depends_on:
       - hermes
     ports:
-      - "127.0.0.1:8787:8787"
+      - "127.0.0.1:3000:8080"
     environment:
-      HERMES_WEBUI_HOST: "0.0.0.0"
-      HERMES_WEBUI_PORT: "8787"
-      HERMES_WEBUI_STATE_DIR: /home/hermeswebui/.hermes/webui
-      # Agent source still needed for WebUI bootstrapping / non-chat panels
-      HERMES_WEBUI_AGENT_DIR: /opt/hermes
-      # Route browser chat through gateway (same tool path as Telegram/CLI)
-      HERMES_WEBUI_CHAT_BACKEND: gateway
-      HERMES_WEBUI_GATEWAY_BASE_URL: http://hermes:8642
-      HERMES_WEBUI_GATEWAY_API_KEY: ${HERMES_API_SERVER_KEY:-}
-      HERMES_WEBUI_GATEWAY_USE_RUNS_API: "true"
-      # Tasks / cron health probe (not chat routing)
-      HERMES_API_URL: http://hermes:8642
-      SEARXNG_URL: http://searxng:8080
-      # Must match HERMES_UID/GID and ownership of data/hermes (never 0 — init loops)
-      WANTED_UID: ${HERMES_UID:-1000}
-      WANTED_GID: ${HERMES_GID:-1000}
-      HERMES_WEBUI_PASSWORD: ${HERMES_WEBUI_PASSWORD:-}
+      # Same compose network — no host.docker.internal needed
+      OPENAI_API_BASE_URL: http://hermes:8642/v1
+      OPENAI_API_KEY: ${HERMES_API_SERVER_KEY:-}
+      # Suppress empty default Ollama backend in the model picker
+      ENABLE_OLLAMA_API: "false"
     volumes:
-      - ./data/hermes:/home/hermeswebui/.hermes
-      # Mount beside home, NOT under it — nested mount into a 0700 bind mount fails
-      # with "permission denied" (securejoin) after chown to host UID.
-      - hermes-agent-src:/opt/hermes:ro
-      - ${HOST_PROJECTS}:/workspace
+      - ./data/open-webui:/app/backend/data
 
   # Metasearch for Hermes web_search — JSON enabled via config/searxng/settings.yml.
   # Same compose profile as hermes (HERMES=1 / --profile hermes).
@@ -182,11 +161,3 @@ services:
       - ./data/cmux:/var/agents-cmux
     # Keep the container running for interactive exec
     command: ["sleep", "infinity"]
-
-volumes:
-  # Populated from nousresearch/hermes-agent:/opt/hermes on first create.
-  # After `docker pull` of a newer agent image, refresh with:
-  #   docker compose --profile hermes stop hermes hermes-webui
-  #   docker volume rm agents_hermes-agent-src   # project_ prefix may vary
-  #   docker compose --profile hermes up -d hermes hermes-webui
-  hermes-agent-src:
