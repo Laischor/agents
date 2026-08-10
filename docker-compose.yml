@@ -115,7 +115,8 @@ services:
     # tini as PID 1 — reap zombies from dead MCP/agent children
     init: true
     # Hard cap so thrash/OOM cannot freeze the whole long-lived container
-    mem_limit: 3g
+    # Override via AGENTS_MEM_LIMIT in .env (e.g. 4g, 6g)
+    mem_limit: ${AGENTS_MEM_LIMIT:-3g}
     environment:
       # Cursor CLI
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}

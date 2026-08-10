@@ -43,9 +43,10 @@ ensure_docker_stack() {
     fail "colima konnte nicht installiert werden"
   fi
 
+  local colima_mem="${COLIMA_MEMORY:-4}"
   if ! colima status 2>/dev/null | grep -qi 'Running'; then
-    log "Starte Colima…"
-    colima start -m 4 -c 4
+    log "Starte Colima… (${colima_mem}g RAM)"
+    colima start -m "$colima_mem" -c 4
   else
     log "Colima läuft bereits."
   fi
@@ -289,5 +290,7 @@ start_agents() {
 }
 
 require_macos
+ensure_env
+load_env
 ensure_docker_stack
 start_agents

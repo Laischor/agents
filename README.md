@@ -31,6 +31,8 @@ ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 GOOGLE_API_KEY=
 HERMES=0            # set to 1 to start the Hermes Agent container
+COLIMA_MEMORY=4     # Colima VM RAM in GiB (when start.sh starts Colima)
+AGENTS_MEM_LIMIT=3g # agents container mem_limit
 ```
 
 ### Shell aliases
@@ -210,7 +212,7 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 The `agents` container stays up for many `compose exec` / Hermes sessions. Each session can leave behind MCP children (`codegraph serve`) or zombies. Compose enables:
 
 - **`init: true`** — Docker’s tini as PID 1 reaps zombies
-- **`mem_limit: 3g`** — hard memory cap so thrash cannot freeze the whole container (Colima defaults to 4g)
+- **`mem_limit`** — hard memory cap so thrash cannot freeze the whole container (default `3g` via `AGENTS_MEM_LIMIT`; Colima default `4g` via `COLIMA_MEMORY`)
 - **`agents-janitor`** — background loop (started once via the entrypoint) that kills *orphaned* `codegraph` trees with no living `claude` / Cursor agent parent; under low `MemAvailable` (&lt;256 MiB) it also drops the oldest orphans first. Log: `/var/log/agents-janitor.log`
 
 After changing these, rebuild/recreate from the **host** (`./start.sh` or `docker compose up -d --build agents`). Check: `docker compose exec agents ps -p 1 -o args=` (should show `docker-init` / tini) and `docker stats agents` (≈3 Gi limit).
