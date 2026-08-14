@@ -55,13 +55,15 @@ services:
       # DISPLAY=:0 → Cursor CLI will call xclip stubs (no real X11 needed)
       TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard","AGENTS_GPU_DIR":"/var/agents-gpu","AGENTS_CMUX_DIR":"/var/agents-cmux","DISPLAY":":0"}'
       # Host-absolute bind mounts (compose interpolates before the container sees them)
-      TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${AGENTS_DIR}/data/gpu:/var/agents-gpu","${AGENTS_DIR}/data/cmux:/var/agents-cmux","${HOME}/.gitconfig:/etc/gitconfig.host:ro","${HOME}/.ssh:/root/.ssh:ro","${HOME}/.config/gh:/root/.config/gh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
+      TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${AGENTS_DIR}/data/gpu:/var/agents-gpu","${AGENTS_DIR}/data/cmux:/var/agents-cmux","${AGENTS_DIR}/data/gitconfig:/root/.gitconfig:ro","${AGENTS_DIR}/data/gh:/root/.config/gh:ro","${HOME}/.ssh:/root/.ssh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
     volumes:
       - ./data/hermes:/opt/data
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
-      # hermes user HOME is /opt/data — not /root, and not home/ (stage2 chowns that tree)
-      - ${HOME}/.config/gh:/opt/data/.config/gh:ro
+      # Linux gh config with oauth_token (host ~/.config/gh has none — Keychain).
+      # Not under home/: stage2 recursively chowns that tree.
+      - ./data/gh:/opt/data/.config/gh:ro
+      - ./data/gitconfig:/opt/data/.gitconfig:ro
 
   # Open WebUI as chat frontend. Talks to Hermes' OpenAI-compatible API
   # (http://hermes:8642/v1) so tools/memory/cron/Docker sandbox stay on the
@@ -153,7 +155,7 @@ services:
       # Identity only — credential helper + safe.directory live in /etc/gitconfig
       - ${HOME}/.gitconfig:/etc/gitconfig.host:ro
       - ${HOME}/.ssh:/root/.ssh:ro
-      - ${HOME}/.config/gh:/root/.config/gh:ro
+      - ./data/gh:/root/.config/gh:ro
       # Persist configs on the host (survive rebuild / down -v)
       - ./data/cursor:/root/.cursor
       # Cursor CLI stores OAuth tokens here on Linux (not under ~/.cursor)

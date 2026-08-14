@@ -101,6 +101,9 @@ hermes_enabled() {
   esac
 }
 
+# shellcheck source=bin/ensure-gh-passthrough.sh
+source "$AGENTS_DIR/bin/ensure-gh-passthrough.sh"
+
 # Opt-in Hermes via compose profile when HERMES=1 in .env
 
 ensure_data_dirs() {
@@ -122,13 +125,8 @@ ensure_data_dirs() {
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes" "$AGENTS_DIR/data/open-webui"
   fi
-  # Host gh config mount — ensure dir exists so Docker does not create a file
-  if [[ ! -d "${HOME}/.config/gh" ]]; then
-    mkdir -p "${HOME}/.config/gh"
-    if command -v gh >/dev/null 2>&1; then
-      log "Hinweis: ~/.config/gh war leer — auf dem Host 'gh auth login' ausführen."
-    fi
-  fi
+  mkdir -p "$AGENTS_DIR/data/gh"
+  [[ -f "$AGENTS_DIR/data/gitconfig" ]] || : >"$AGENTS_DIR/data/gitconfig"
   # Legacy empty file mount blocked Claude auth writes — remove if present
   if [[ -f "$AGENTS_DIR/data/claude.json" ]]; then
     rm -f "$AGENTS_DIR/data/claude.json"
@@ -160,36 +158,6 @@ ensure_gh_token() {
       log "Hinweis: gh nicht eingeloggt — 'gh auth login' auf dem Host, oder GH_TOKEN in .env."
       _AGENTS_GH_TOKEN_WARNED=1
     fi
-  fi
-}
-
-# Replace KEY= (or export KEY=) in a dotenv file without touching other keys.
-upsert_dotenv_key() {
-  local file="$1" key="$2" value="$3"
-  local tmp
-  mkdir -p "$(dirname "$file")"
-  [[ -f "$file" ]] || : >"$file"
-  tmp="$(mktemp)"
-  grep -vE "^(export[[:space:]]+)?${key}=" "$file" >"$tmp" || true
-  printf '%s=%s\n' "$key" "$value" >>"$tmp"
-  mv "$tmp" "$file"
-  chmod 600 "$file" 2>/dev/null || true
-}
-
-# Hermes github-auth / Skills Hub read GITHUB_TOKEN via get_env_value (process
-# env or /opt/data/.env). Persist the host token so it survives compose blanks
-# and hermes doctor / config UI. Copy gh config into subprocess HOME (home/)
-# rather than bind-mounting — stage2 recursively chowns that tree.
-ensure_hermes_github_env() {
-  hermes_enabled || return 0
-  [[ -n "${GH_TOKEN:-}" ]] || return 0
-  mkdir -p "$AGENTS_DIR/data/hermes"
-  export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
-  upsert_dotenv_key "$AGENTS_DIR/data/hermes/.env" GH_TOKEN "$GH_TOKEN"
-  upsert_dotenv_key "$AGENTS_DIR/data/hermes/.env" GITHUB_TOKEN "$GITHUB_TOKEN"
-  if [[ -d "${HOME}/.config/gh" ]]; then
-    mkdir -p "$AGENTS_DIR/data/hermes/home/.config/gh"
-    cp -a "${HOME}/.config/gh/." "$AGENTS_DIR/data/hermes/home/.config/gh/" 2>/dev/null || true
   fi
 }
 
@@ -286,7 +254,7 @@ start_agents() {
   load_env
   # Re-apply after load_env in case .env left GH_TOKEN empty
   ensure_gh_token
-  ensure_hermes_github_env
+  ensure_gh_passthrough
 
   if docker compose version >/dev/null 2>&1; then
     COMPOSE=(docker compose -f "$COMPOSE_FILE")
@@ -296,6 +264,8 @@ start_agents() {
 
   if hermes_enabled; then
     log "Starte agents + hermes (+ open-webui)…"
+    log "Entferne alte Hermes-Sandboxes (gh/git-Mounts neu)…"
+    reap_hermes_sandboxes
     # Drop leftover community WebUI from older stacks (no longer in compose)
     if docker ps -a --format '{{.Names}}' | grep -Eqx 'hermes-webui'; then
       log "Entferne alten hermes-webui Container…"

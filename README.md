@@ -72,9 +72,9 @@ The launcher starts the container if needed and sets the working directory 1:1 t
 
 ## GitHub CLI (`gh`)
 
-On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/.config/gh/hosts.yml`. Mounting that directory alone is not enough for the Linux container.
+On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/.config/gh/hosts.yml`. Mounting that directory into Linux is not enough — and for Hermes it is harmful: the Docker sandbox bind-mounts a persist dir over `/root`, so a token-less host `~/.config/gh` hides any in-container login after a restart.
 
-`./start.sh` and `run.sh` call `gh auth token` on the host and pass the result as `GH_TOKEN` (and `GITHUB_TOKEN`) into the `agents` container, the Hermes gateway, and the Hermes sandbox. Hermes Skills Hub / github-auth look up `GITHUB_TOKEN` via `get_env_value` (process env or `data/hermes/.env`); `./start.sh` writes both keys there. Host `~/.config/gh` is mounted read-only at `/root/.config/gh` in `agents` and at `/opt/data/.config/gh` in Hermes (the `hermes` user's HOME). Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
+`./start.sh` and `run.sh` call `gh auth token` on the host and write a Linux gh config (with `oauth_token`) plus a git credential helper into `data/gh/` and `data/gitconfig` (gitignored). Those files are mounted into `agents`, the Hermes gateway (`/opt/data/.config/gh`), and the Hermes sandbox (`/root/.config/gh` and `/root/.gitconfig`). They also set `GH_TOKEN` / `GITHUB_TOKEN` on the containers and in `data/hermes/.env`. `./start.sh` removes leftover Hermes sandbox containers so the new mounts apply (volume mounts are frozen at `docker run`). Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
 
 Git in the container uses `/etc/gitconfig` for `safe.directory *` and `credential.helper = !gh auth git-credential`. Host `~/.gitconfig` is mounted at `/etc/gitconfig.host` (read-only) so only `user.name` / `user.email` are copied into the container — not macOS credential helpers that clear the chain or point at `/opt/homebrew/bin/gh`. On the host you can use the same pathless helper: `helper = !gh auth git-credential`.
 
@@ -194,7 +194,8 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 |-------------------|----------------------|
 | `~/.gitconfig`         | `/etc/gitconfig.host` (read-only; identity only) |
 | `~/.ssh/`              | `/root/.ssh` (read-only, GitHub SSH) |
-| `~/.config/gh/`        | `agents`: `/root/.config/gh`; Hermes gateway: `/opt/data/.config/gh` (read-only; config only — token via `GH_TOKEN` / `GITHUB_TOKEN`) |
+| `data/gitconfig`       | `agents` / Hermes sandbox: `/root/.gitconfig`; Hermes gateway: `/opt/data/.gitconfig` (identity + `gh auth git-credential`) |
+| `data/gh/`             | `agents` / Hermes sandbox: `/root/.config/gh`; Hermes gateway: `/opt/data/.config/gh` (Linux hosts.yml with token) |
 | `data/cursor/`         | `/root/.cursor`         |
 | `data/cursor-config/`  | `/root/.config/cursor` (login tokens) |
 | `data/pi/`             | `/root/.pi`             |

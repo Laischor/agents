@@ -33,6 +33,16 @@ fi
 # Script path wins over a stale .env value
 export AGENTS_DIR
 
+# shellcheck source=bin/ensure-gh-passthrough.sh
+source "$AGENTS_DIR/bin/ensure-gh-passthrough.sh"
+
+hermes_enabled() {
+  case "${HERMES:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # macOS: gh OAuth lives in Keychain, not in ~/.config/gh — inject for compose.
 if [[ -z "${GH_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
   if token="$(gh auth token 2>/dev/null)" && [[ -n "$token" ]]; then
@@ -42,6 +52,7 @@ fi
 if [[ -n "${GH_TOKEN:-}" ]]; then
   export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
 fi
+ensure_gh_passthrough
 
 # Projects root on the host (== path inside container)
 HOST_PROJECTS="${HOST_PROJECTS:-$HOME/Documents/projects}"
@@ -57,13 +68,6 @@ else
   exit 1
 fi
 
-hermes_enabled() {
-  case "${HERMES:-0}" in
-    1|true|TRUE|yes|YES|on|ON) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 ensure_services() {
   mkdir -p "$AGENTS_DIR/data/clipboard" "$AGENTS_DIR/data/gpu/jobs" \
     "$AGENTS_DIR/data/gpu/running" "$AGENTS_DIR/data/gpu/results" \
@@ -73,17 +77,8 @@ ensure_services() {
     "$AGENTS_DIR/data/cmux/sessions"
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes" "$AGENTS_DIR/data/open-webui"
-    if [[ -n "${GH_TOKEN:-}" ]]; then
-      local env_file tmp
-      export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
-      env_file="$AGENTS_DIR/data/hermes/.env"
-      tmp="$(mktemp)"
-      [[ -f "$env_file" ]] || : >"$env_file"
-      grep -vE '^(export[[:space:]]+)?(GH_TOKEN|GITHUB_TOKEN)=' "$env_file" >"$tmp" || true
-      printf 'GH_TOKEN=%s\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" "$GITHUB_TOKEN" >>"$tmp"
-      mv "$tmp" "$env_file"
-      chmod 600 "$env_file" 2>/dev/null || true
-    fi
+    ensure_gh_passthrough
+    reap_hermes_sandboxes
     "${COMPOSE[@]}" --profile hermes up -d --quiet-pull
   else
     "${COMPOSE[@]}" up -d --quiet-pull
