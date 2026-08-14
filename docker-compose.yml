@@ -83,6 +83,8 @@ services:
       OPENAI_API_KEY: ${HERMES_API_SERVER_KEY:-}
       # Suppress empty default Ollama backend in the model picker
       ENABLE_OLLAMA_API: "false"
+      # No login — Open WebUI is only reachable via localhost / Tailscale
+      WEBUI_AUTH: "false"
     volumes:
       - ./data/open-webui:/app/backend/data
 
