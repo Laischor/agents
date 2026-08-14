@@ -74,7 +74,7 @@ The launcher starts the container if needed and sets the working directory 1:1 t
 
 On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/.config/gh/hosts.yml`. Mounting that directory alone is not enough for the Linux container.
 
-`./start.sh` and `run.sh` call `gh auth token` on the host and pass the result as `GH_TOKEN` into the container (and Hermes sandbox). Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
+`./start.sh` and `run.sh` call `gh auth token` on the host and pass the result as `GH_TOKEN` (and `GITHUB_TOKEN`) into the `agents` container, the Hermes gateway, and the Hermes sandbox. Hermes Skills Hub / github-auth look up `GITHUB_TOKEN` via `get_env_value` (process env or `data/hermes/.env`); `./start.sh` writes both keys there. Host `~/.config/gh` is mounted read-only at `/root/.config/gh` in `agents` and at `/opt/data/.config/gh` in Hermes (the `hermes` user's HOME). Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
 
 Git in the container uses `/etc/gitconfig` for `safe.directory *` and `credential.helper = !gh auth git-credential`. Host `~/.gitconfig` is mounted at `/etc/gitconfig.host` (read-only) so only `user.name` / `user.email` are copied into the container — not macOS credential helpers that clear the chain or point at `/opt/homebrew/bin/gh`. On the host you can use the same pathless helper: `helper = !gh auth git-credential`.
 
@@ -194,7 +194,7 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 |-------------------|----------------------|
 | `~/.gitconfig`         | `/etc/gitconfig.host` (read-only; identity only) |
 | `~/.ssh/`              | `/root/.ssh` (read-only, GitHub SSH) |
-| `~/.config/gh/`        | `/root/.config/gh` (read-only; config only — token via `GH_TOKEN`) |
+| `~/.config/gh/`        | `agents`: `/root/.config/gh`; Hermes gateway: `/opt/data/.config/gh` (read-only; config only — token via `GH_TOKEN` / `GITHUB_TOKEN`) |
 | `data/cursor/`         | `/root/.cursor`         |
 | `data/cursor-config/`  | `/root/.config/cursor` (login tokens) |
 | `data/pi/`             | `/root/.pi`             |

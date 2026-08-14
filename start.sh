@@ -141,6 +141,7 @@ ensure_data_dirs() {
 ensure_gh_token() {
   if [[ -n "${GH_TOKEN:-}" ]]; then
     export GH_TOKEN
+    export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
     return 0
   fi
   if ! command -v gh >/dev/null 2>&1; then
@@ -149,6 +150,7 @@ ensure_gh_token() {
   local token
   if token="$(gh auth token 2>/dev/null)" && [[ -n "$token" ]]; then
     export GH_TOKEN="$token"
+    export GITHUB_TOKEN="${GITHUB_TOKEN:-$token}"
     if [[ -z "${_AGENTS_GH_TOKEN_LOGGED:-}" ]]; then
       log "GH_TOKEN aus Host-Keychain (gh auth token) für den Container gesetzt."
       _AGENTS_GH_TOKEN_LOGGED=1
@@ -158,6 +160,36 @@ ensure_gh_token() {
       log "Hinweis: gh nicht eingeloggt — 'gh auth login' auf dem Host, oder GH_TOKEN in .env."
       _AGENTS_GH_TOKEN_WARNED=1
     fi
+  fi
+}
+
+# Replace KEY= (or export KEY=) in a dotenv file without touching other keys.
+upsert_dotenv_key() {
+  local file="$1" key="$2" value="$3"
+  local tmp
+  mkdir -p "$(dirname "$file")"
+  [[ -f "$file" ]] || : >"$file"
+  tmp="$(mktemp)"
+  grep -vE "^(export[[:space:]]+)?${key}=" "$file" >"$tmp" || true
+  printf '%s=%s\n' "$key" "$value" >>"$tmp"
+  mv "$tmp" "$file"
+  chmod 600 "$file" 2>/dev/null || true
+}
+
+# Hermes github-auth / Skills Hub read GITHUB_TOKEN via get_env_value (process
+# env or /opt/data/.env). Persist the host token so it survives compose blanks
+# and hermes doctor / config UI. Copy gh config into subprocess HOME (home/)
+# rather than bind-mounting — stage2 recursively chowns that tree.
+ensure_hermes_github_env() {
+  hermes_enabled || return 0
+  [[ -n "${GH_TOKEN:-}" ]] || return 0
+  mkdir -p "$AGENTS_DIR/data/hermes"
+  export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
+  upsert_dotenv_key "$AGENTS_DIR/data/hermes/.env" GH_TOKEN "$GH_TOKEN"
+  upsert_dotenv_key "$AGENTS_DIR/data/hermes/.env" GITHUB_TOKEN "$GITHUB_TOKEN"
+  if [[ -d "${HOME}/.config/gh" ]]; then
+    mkdir -p "$AGENTS_DIR/data/hermes/home/.config/gh"
+    cp -a "${HOME}/.config/gh/." "$AGENTS_DIR/data/hermes/home/.config/gh/" 2>/dev/null || true
   fi
 }
 
@@ -254,6 +286,7 @@ start_agents() {
   load_env
   # Re-apply after load_env in case .env left GH_TOKEN empty
   ensure_gh_token
+  ensure_hermes_github_env
 
   if docker compose version >/dev/null 2>&1; then
     COMPOSE=(docker compose -f "$COMPOSE_FILE")

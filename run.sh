@@ -39,6 +39,9 @@ if [[ -z "${GH_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
     export GH_TOKEN="$token"
   fi
 fi
+if [[ -n "${GH_TOKEN:-}" ]]; then
+  export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
+fi
 
 # Projects root on the host (== path inside container)
 HOST_PROJECTS="${HOST_PROJECTS:-$HOME/Documents/projects}"
@@ -70,6 +73,17 @@ ensure_services() {
     "$AGENTS_DIR/data/cmux/sessions"
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes" "$AGENTS_DIR/data/open-webui"
+    if [[ -n "${GH_TOKEN:-}" ]]; then
+      local env_file tmp
+      export GITHUB_TOKEN="${GITHUB_TOKEN:-$GH_TOKEN}"
+      env_file="$AGENTS_DIR/data/hermes/.env"
+      tmp="$(mktemp)"
+      [[ -f "$env_file" ]] || : >"$env_file"
+      grep -vE '^(export[[:space:]]+)?(GH_TOKEN|GITHUB_TOKEN)=' "$env_file" >"$tmp" || true
+      printf 'GH_TOKEN=%s\nGITHUB_TOKEN=%s\n' "$GH_TOKEN" "$GITHUB_TOKEN" >>"$tmp"
+      mv "$tmp" "$env_file"
+      chmod 600 "$env_file" 2>/dev/null || true
+    fi
     "${COMPOSE[@]}" --profile hermes up -d --quiet-pull
   else
     "${COMPOSE[@]}" up -d --quiet-pull
@@ -196,6 +210,8 @@ if [[ "$cmd" == "hermes-setup" ]]; then
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
     -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
     -e GOOGLE_API_KEY="${GOOGLE_API_KEY:-}" \
+    -e GH_TOKEN="${GH_TOKEN:-}" \
+    -e GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
     -w "$workdir" \
     nousresearch/hermes-agent:latest setup "$@"
 fi
