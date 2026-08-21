@@ -52,18 +52,22 @@ import json, os, pathlib, sys
 dest = pathlib.Path(sys.argv[1])
 token = os.environ["GH_TOKEN"]
 user = os.environ["GH_USER"]
+# Match post-migration hosts.yml (unquoted user) so gh does not rewrite under :ro.
 dest.write_text(
     "github.com:\n"
     "    git_protocol: https\n"
     "    users:\n"
     f"        {json.dumps(user)}:\n"
     f"            oauth_token: {json.dumps(token)}\n"
-    f"    user: {json.dumps(user)}\n"
+    f"    user: {user}\n"
     f"    oauth_token: {json.dumps(token)}\n"
 )
 PY
   chmod 600 "$hosts_yml"
-  printf '%s\n' 'git_protocol: https' >"$gh_dir/config.yml"
+  # gh ≥2.40 migrates config.yml (adds version) and fatals if the mount is :ro.
+  # Pre-seed version so credential-helper / any gh call skips migration.
+  # See: https://github.com/cli/cli/issues/8462
+  printf '%s\n' 'git_protocol: https' 'version: "1"' >"$gh_dir/config.yml"
 
   if command -v hermes_enabled >/dev/null 2>&1 && hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes/home/.config/gh"
