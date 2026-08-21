@@ -1,6 +1,6 @@
 # agents
 
-Docker environment for coding agents: **Cursor CLI**, **Pi**, and **Claude Code**.  
+Docker environment for coding agents: **Cursor CLI**, **Pi**, **Claude Code**, and **OpenCode**.  
 Also included: optional **Hermes Agent**, **Caveman**, and **CodeGraph**.  
 Projects stay on the host; agents run isolated in the container and drive Docker through the host socket.
 
@@ -45,6 +45,7 @@ agents() { "$AGENTS_DIR/run.sh" "$@"; }
 dagent()     { agents agent "$@"; }
 dpi()        { agents pi "$@"; }
 dclaude()    { agents claude "$@"; }
+dopencode()  { agents opencode "$@"; }
 dhermes()    { agents hermes "$@"; }
 dcodegraph() { agents codegraph "$@"; }
 agents-shell() { agents bash "$@"; }
@@ -63,6 +64,7 @@ cd ~/Documents/projects/my-project
 dagent       # Cursor CLI
 dpi          # Pi
 dclaude      # Claude Code (Anthropic)
+dopencode    # OpenCode
 dhermes      # Hermes Agent CLI (requires HERMES=1)
 dcodegraph   # CodeGraph CLI
 agents-shell
@@ -78,11 +80,11 @@ On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/
 
 Git in the container uses `/etc/gitconfig` for `safe.directory *` and `credential.helper = !gh auth git-credential`. Host `~/.gitconfig` is mounted at `/etc/gitconfig.host` (read-only) so only `user.name` / `user.email` are copied into the container — not macOS credential helpers that clear the chain or point at `/opt/homebrew/bin/gh`. On the host you can use the same pathless helper: `helper = !gh auth git-credential`.
 
-## Screenshot paste (Claude + Cursor)
+## Screenshot paste (Claude + Cursor + OpenCode)
 
-Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PNGs into `data/clipboard/`; stubs for `xclip` / `wl-paste` inside the container serve them to Claude Code and the Cursor CLI (`agent`).
+Docker cannot read the macOS clipboard. A small host bridge mirrors clipboard PNGs into `data/clipboard/`; stubs for `xclip` / `wl-paste` inside the container serve them to Claude Code, the Cursor CLI (`agent`), and OpenCode.
 
-- Starts automatically with `dagent` / `dclaude` (or: `agents clipboard-bridge --daemon`)
+- Starts automatically with `dagent` / `dclaude` / `dopencode` (or: `agents clipboard-bridge --daemon`)
 - Copy a screenshot to the clipboard, then paste with **Ctrl+V** (not Cmd+V)
 - Cursor needs a dummy `DISPLAY` (set in Compose / `run.sh`) so it will call the stubs
 - Status / stop: `agents clipboard-bridge --status` · `agents clipboard-bridge --stop`
@@ -95,7 +97,7 @@ Docker cannot use the host cmux control socket without opening it to every local
 2. Container `cmux notify` / agent hooks enqueue a job in `data/cmux/`
 3. The host daemon writes **OSC 777** to that TTY (pane ring + desktop notification) and plays **afplay**
 
-- Starts automatically with `dagent` / `dclaude` (or: `agents cmux-bridge --daemon`)
+- Starts automatically with `dagent` / `dclaude` / `dopencode` (or: `agents cmux-bridge --daemon`)
 - Container stub: `cmux` / `cmux-agent-hook` (Claude `Notification`/`Stop`, Cursor `stop` only)
 - Forwards `CMUX_WORKSPACE_ID` / `CMUX_SURFACE_ID` for per-pane session routing
 - Stop hooks always notify (cmux `hooks … stop` alone only updates sidebar state)
@@ -184,7 +186,7 @@ Docker requires dashboard basic auth — `./start.sh` writes `HERMES_DASHBOARD_U
 
 ### Terminal sandbox (`agents:local`)
 
-Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), **Pi**, and **`gh`** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, `~/.config/gh`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
+Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), **Pi**, **OpenCode**, and **`gh`** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, `data/opencode`, `~/.config/gh`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
 
 ## Persistence
 
@@ -200,7 +202,9 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 | `data/cursor-config/`  | `/root/.config/cursor` (login tokens) |
 | `data/pi/`             | `/root/.pi`             |
 | `data/claude/`         | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
-| `data/clipboard/`      | `/var/agents-clipboard` (host PNG bridge for Claude/Cursor paste) |
+| `data/opencode/`       | `/root/.local/share/opencode` (auth + sessions) |
+| `data/opencode-config/`| `/root/.config/opencode` |
+| `data/clipboard/`      | `/var/agents-clipboard` (host PNG bridge for Claude/Cursor/OpenCode paste) |
 | `data/gpu/`            | `/var/agents-gpu` (host Blender/Godot job queue via gpu-bridge) |
 | `data/cmux/`           | `/var/agents-cmux` (host cmux notify/hooks queue via cmux-bridge) |
 | `data/hermes/`         | Hermes home: gateway `/opt/data` |
@@ -214,7 +218,7 @@ The `agents` container stays up for many `compose exec` / Hermes sessions. Each 
 
 - **`init: true`** — Docker’s tini as PID 1 reaps zombies
 - **`mem_limit`** — hard memory cap so thrash cannot freeze the whole container (default `3g` via `AGENTS_MEM_LIMIT`; Colima default `4g` via `COLIMA_MEMORY`)
-- **`agents-janitor`** — background loop (started once via the entrypoint) that kills *orphaned* `codegraph` trees with no living `claude` / Cursor agent parent; under low `MemAvailable` (&lt;256 MiB) it also drops the oldest orphans first. Log: `/var/log/agents-janitor.log`
+- **`agents-janitor`** — background loop (started once via the entrypoint) that kills *orphaned* `codegraph` trees with no living `claude` / Cursor / OpenCode parent; under low `MemAvailable` (&lt;256 MiB) it also drops the oldest orphans first. Log: `/var/log/agents-janitor.log`
 
 After changing these, rebuild/recreate from the **host** (`./start.sh` or `docker compose up -d --build agents`). Check: `docker compose exec agents ps -p 1 -o args=` (should show `docker-init` / tini) and `docker stats agents` (≈3 Gi limit).
 
@@ -227,6 +231,7 @@ On container start the entrypoint registers (idempotent):
 | Pi           | `pi-caveman` package                         | `pi-codegraph` + CLI `codegraph`               |
 | Claude Code  | Plugin `caveman@caveman` (default: **ultra**) | MCP `codegraph serve --mcp`                    |
 | Cursor CLI   | —                                            | MCP in `~/.cursor/mcp.json`                    |
+| OpenCode     | —                                            | MCP in `~/.config/opencode/opencode.json`      |
 
 Default mode for Claude: `CAVEMAN_DEFAULT_MODE=ultra` in `docker-compose.yml`. Override per session with `/caveman lite|full|ultra`.
 

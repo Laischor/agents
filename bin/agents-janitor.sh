@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reap orphaned CodeGraph MCP trees left behind after agent sessions die.
-# Safe: never kills claude/cursor-agent; only codegraph (+ its watchdogs) without
+# Safe: never kills claude/cursor-agent/opencode; only codegraph (+ its watchdogs) without
 # a living agent ancestor. Also emergency-kills oldest orphans when RAM is low.
 #
 # Started once from container-entrypoint (PID file /var/run/agents-janitor.pid).
@@ -50,6 +50,9 @@ is_agent_proc() {
         return 0
       fi
       return 1
+      ;;
+    *'/usr/local/bin/opencode'*|*'/bin/opencode'*|*' opencode '*|*/opencode)
+      return 0
       ;;
     *)
       return 1

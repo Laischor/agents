@@ -91,6 +91,25 @@ RUN npm install -g @colbymchenry/codegraph@1.4.1 \
 RUN npm install -g @anthropic-ai/claude-code \
   && claude --version
 
+# OpenCode (native binary under /usr/local — Hermes docker backend overlays /root)
+ARG OPENCODE_VERSION=1.18.19
+RUN arch="$(dpkg --print-architecture)" \
+  && case "$arch" in \
+       amd64) oc_arch=x64 ;; \
+       arm64) oc_arch=arm64 ;; \
+       *) echo "unsupported arch: $arch"; exit 1 ;; \
+     esac \
+  && oc_target="linux-${oc_arch}" \
+  && if [ "$oc_arch" = "x64" ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then \
+       oc_target="linux-x64-baseline"; \
+     fi \
+  && wget -qO /tmp/opencode.tar.gz \
+       "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-${oc_target}.tar.gz" \
+  && tar -xzf /tmp/opencode.tar.gz -C /tmp \
+  && install -m 755 /tmp/opencode /usr/local/bin/opencode \
+  && rm -f /tmp/opencode.tar.gz /tmp/opencode \
+  && opencode --version
+
 RUN apt-get update && apt-get install -y --no-install-recommends python3-pil \
   && rm -rf /var/lib/apt/lists/*
 

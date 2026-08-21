@@ -112,6 +112,8 @@ ensure_data_dirs() {
     "$AGENTS_DIR/data/cursor-config" \
     "$AGENTS_DIR/data/pi" \
     "$AGENTS_DIR/data/claude" \
+    "$AGENTS_DIR/data/opencode" \
+    "$AGENTS_DIR/data/opencode-config" \
     "$AGENTS_DIR/data/clipboard" \
     "$AGENTS_DIR/data/gpu/jobs" \
     "$AGENTS_DIR/data/gpu/running" \
@@ -283,8 +285,8 @@ start_agents() {
     "${COMPOSE[@]}" up -d --build
   fi
 
-  log "Fertig. Beispiele: dagent | dpi | dclaude | agents-shell"
-  log "Screenshot-Paste: Bridge startet mit dagent/dclaude (Ctrl+V, nicht Cmd+V)"
+  log "Fertig. Beispiele: dagent | dpi | dclaude | dopencode | agents-shell"
+  log "Screenshot-Paste: Bridge startet mit dagent/dclaude/dopencode (Ctrl+V, nicht Cmd+V)"
   if hermes_enabled; then
     log "Open WebUI (Chat → Hermes): http://127.0.0.1:3000"
     log "Hermes Dashboard (Config): http://127.0.0.1:9119 (Login: ${HERMES_DASHBOARD_USER})"

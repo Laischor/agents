@@ -1,6 +1,6 @@
 services:
   # Opt-in: set HERMES=1 in .env (compose profile "hermes")
-  # Terminal backend = docker → agents:local (claude / agent / pi available there).
+  # Terminal backend = docker → agents:local (claude / agent / pi / opencode available there).
   # AGENTS_DIR must be absolute in .env (start.sh / run.sh write it automatically).
   # Gateway+dashboard (:9119) for config/ops; Open WebUI (:3000) for chat.
   hermes:
@@ -55,7 +55,7 @@ services:
       # DISPLAY=:0 → Cursor CLI will call xclip stubs (no real X11 needed)
       TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard","AGENTS_GPU_DIR":"/var/agents-gpu","AGENTS_CMUX_DIR":"/var/agents-cmux","DISPLAY":":0"}'
       # Host-absolute bind mounts (compose interpolates before the container sees them)
-      TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${AGENTS_DIR}/data/gpu:/var/agents-gpu","${AGENTS_DIR}/data/cmux:/var/agents-cmux","${AGENTS_DIR}/data/gitconfig:/root/.gitconfig:ro","${AGENTS_DIR}/data/gh:/root/.config/gh:ro","${HOME}/.ssh:/root/.ssh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
+      TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/opencode:/root/.local/share/opencode","${AGENTS_DIR}/data/opencode-config:/root/.config/opencode","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${AGENTS_DIR}/data/gpu:/var/agents-gpu","${AGENTS_DIR}/data/cmux:/var/agents-cmux","${AGENTS_DIR}/data/gitconfig:/root/.gitconfig:ro","${AGENTS_DIR}/data/gh:/root/.config/gh:ro","${HOME}/.ssh:/root/.ssh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
     volumes:
       - ./data/hermes:/opt/data
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
@@ -162,7 +162,10 @@ services:
       - ./data/cursor-config:/root/.config/cursor
       - ./data/pi:/root/.pi
       - ./data/claude:/root/.claude
-      # macOS clipboard bridge drop dir (PNG for Claude/Cursor Ctrl+V paste)
+      # OpenCode auth/sessions + global config (survive rebuild)
+      - ./data/opencode:/root/.local/share/opencode
+      - ./data/opencode-config:/root/.config/opencode
+      # macOS clipboard bridge drop dir (PNG for Claude/Cursor/OpenCode Ctrl+V paste)
       - ./data/clipboard:/var/agents-clipboard
       # macOS GPU job queue (Blender/Godot via gpu-bridge.sh)
       - ./data/gpu:/var/agents-gpu

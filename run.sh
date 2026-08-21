@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch an agent CLI inside the agents container.
-# Usage: run.sh <agent|pi|claude|hermes|hermes-setup|cursor-agent|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]
+# Usage: run.sh <agent|pi|claude|opencode|hermes|hermes-setup|cursor-agent|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]
 
 set -euo pipefail
 
@@ -156,15 +156,15 @@ CMUX_DOCKER_ENV=(
 
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
-  echo "usage: $(basename "$0") <agent|pi|claude|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]" >&2
+  echo "usage: $(basename "$0") <agent|pi|claude|opencode|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]" >&2
   exit 1
 fi
 shift
 
 case "$cmd" in
-  agent|cursor-agent|pi|claude|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash) ;;
+  agent|cursor-agent|pi|claude|opencode|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash) ;;
   *)
-    echo "unknown command: $cmd (expected agent, pi, claude, hermes, hermes-setup, codegraph, clipboard-bridge, gpu-bridge, cmux-bridge, or bash)" >&2
+    echo "unknown command: $cmd (expected agent, pi, claude, opencode, hermes, hermes-setup, codegraph, clipboard-bridge, gpu-bridge, cmux-bridge, or bash)" >&2
     exit 1
     ;;
 esac
@@ -181,7 +181,7 @@ if [[ "$cmd" == "gpu-bridge" ]]; then
   exec "$AGENTS_DIR/gpu-bridge.sh" "$@"
 fi
 
-# Host cmux bridge — notifications/sounds (auto-started with agent/claude)
+# Host cmux bridge — notifications/sounds (auto-started with agent/claude/opencode)
 if [[ "$cmd" == "cmux-bridge" ]]; then
   mkdir -p "$AGENTS_DIR/data/cmux/jobs" "$AGENTS_DIR/data/cmux/running" \
     "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs"
@@ -230,11 +230,11 @@ if ! docker ps --format '{{.Names}}' | grep -qx agents; then
   ensure_services
 fi
 
-# Screenshot paste: host bridge → xclip/wl-paste stubs (Claude + Cursor CLI).
+# Screenshot paste: host bridge → xclip/wl-paste stubs (Claude + Cursor CLI + OpenCode).
 # cmux notifications: host cmux-bridge → container `cmux` stub.
 # DISPLAY=:0 is a no-op for Claude; Cursor only probes clipboard when DISPLAY is set.
 case "$cmd" in
-  claude|agent|cursor-agent)
+  claude|agent|cursor-agent|opencode)
     ensure_clipboard_bridge
     ensure_cmux_bridge
     exec "${COMPOSE[@]}" exec -it -w "$workdir" \

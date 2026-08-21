@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Runtime setup for mounted agent configs (Pi packages, Claude plugins/MCP, Cursor MCP).
-# Image build cannot write into volume-mounted ~/.pi / ~/.claude / ~/.cursor.
+# Runtime setup for mounted agent configs (Pi packages, Claude plugins/MCP, Cursor/OpenCode MCP).
+# Image build cannot write into volume-mounted ~/.pi / ~/.claude / ~/.cursor / ~/.config/opencode.
 
 set -u
 
@@ -142,6 +142,50 @@ ensure_claude_codegraph_mcp() {
   if ! claude mcp add -s user codegraph -- codegraph serve --mcp; then
     printf 'warning: could not add codegraph MCP to Claude\n' >&2
   fi
+}
+
+# OpenCode global config is mounted at /root/.config/opencode
+ensure_opencode_codegraph_mcp() {
+  if ! command -v opencode >/dev/null 2>&1 || ! command -v codegraph >/dev/null 2>&1; then
+    return
+  fi
+
+  local cfg_dir="${HOME}/.config/opencode"
+  local cfg="${cfg_dir}/opencode.json"
+  mkdir -p "$cfg_dir"
+
+  if [[ -f "$cfg" ]] && grep -Fq '"codegraph"' "$cfg" 2>/dev/null; then
+    return
+  fi
+
+  printf 'Configuring OpenCode MCP: codegraph\n'
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'warning: python3 missing; skip OpenCode codegraph MCP\n' >&2
+    return
+  fi
+
+  OPENCODE_CFG="$cfg" python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+path = Path(os.environ["OPENCODE_CFG"])
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text() or "{}")
+    except json.JSONDecodeError:
+        data = {}
+data.setdefault("$schema", "https://opencode.ai/config.json")
+data.setdefault("autoupdate", False)
+mcp = data.setdefault("mcp", {})
+if "codegraph" not in mcp:
+    mcp["codegraph"] = {
+        "type": "local",
+        "command": ["codegraph", "serve", "--mcp"],
+        "enabled": True,
+    }
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
 }
 
 # Cursor CLI config is mounted at /root/.cursor
@@ -317,6 +361,7 @@ ensure_claude_codegraph_mcp
 ensure_claude_cmux_hooks
 ensure_cursor_codegraph_mcp
 ensure_cursor_cmux_hooks
+ensure_opencode_codegraph_mcp
 ensure_agents_janitor
 
 exec "$@"
