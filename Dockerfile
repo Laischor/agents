@@ -92,7 +92,7 @@ RUN npm install -g @anthropic-ai/claude-code \
   && claude --version
 
 # OpenCode (native binary under /usr/local — Hermes docker backend overlays /root)
-ARG OPENCODE_VERSION=1.18.19
+# Same as Claude/Cursor/Pi: track latest. GitHub /releases/latest/download avoids the API.
 RUN arch="$(dpkg --print-architecture)" \
   && case "$arch" in \
        amd64) oc_arch=x64 ;; \
@@ -104,7 +104,7 @@ RUN arch="$(dpkg --print-architecture)" \
        oc_target="linux-x64-baseline"; \
      fi \
   && wget -qO /tmp/opencode.tar.gz \
-       "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-${oc_target}.tar.gz" \
+       "https://github.com/anomalyco/opencode/releases/latest/download/opencode-${oc_target}.tar.gz" \
   && tar -xzf /tmp/opencode.tar.gz -C /tmp \
   && install -m 755 /tmp/opencode /usr/local/bin/opencode \
   && rm -f /tmp/opencode.tar.gz /tmp/opencode \
