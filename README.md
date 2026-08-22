@@ -90,9 +90,9 @@ T3 does not have a long-lived deploy password. Each browser/device needs a **one
 
 1. `./start.sh` waits for `:3773` and prints `Token:` plus `http://127.0.0.1:3773/pair#token=…`
 2. Later (or if you missed it): `dt3 pair` — same output, also `data/t3/pairing.txt`
-3. Paste the token into the pairing page, or open the **Host URL** (not the Docker `172.x` address)
+3. Scan the QR or paste the token — the QR encodes `T3CODE_PUBLIC_URL` (default `http://127.0.0.1:3773`), not the Docker `172.x` address
 
-Tokens expire (default via `dt3 pair`: 1 hour) and are single-use. Remote access: set `T3CODE_PUBLIC_URL` (e.g. a Tailscale HTTPS URL) so pairing links are rewritten to that host instead of localhost.
+Tokens expire (default via `dt3 pair`: 1 hour) and are single-use. Remote access: set `T3CODE_PUBLIC_URL` (e.g. a Tailscale HTTPS URL) so pairing links **and the QR** use that host.
 
 Set `AGENTS_T3_SERVE=0` in `.env` to skip auto-start, then `dt3 serve` when you want it. Recreate `agents` from the **host** after changing the compose port mapping (`./start.sh`).
 

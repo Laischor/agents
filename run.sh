@@ -249,38 +249,16 @@ case "$cmd" in
     # (172.x); rewrite to the host publish URL so the token is usable.
     if [[ "${1:-}" == "pair" ]]; then
       shift
-      t3_has_base=0
-      t3_has_ttl=0
-      for t3_a in "$@"; do
-        case "$t3_a" in
-          --base-dir|--base-dir=*) t3_has_base=1 ;;
-          --ttl|--ttl=*) t3_has_ttl=1 ;;
-        esac
-      done
-      t3_pair_args=()
-      [[ "$t3_has_base" -eq 1 ]] || t3_pair_args+=(--base-dir /root/.t3)
-      [[ "$t3_has_ttl" -eq 1 ]] || t3_pair_args+=(--ttl 1h)
-      t3_pair_args+=("$@")
-      t3_out=""
-      t3_ec=0
-      t3_out="$("${COMPOSE[@]}" exec -T "$SERVICE" t3 pair "${t3_pair_args[@]}")" || t3_ec=$?
       t3_public="${T3CODE_PUBLIC_URL:-http://127.0.0.1:3773}"
-      t3_public="${t3_public%/}"
-      t3_rewritten="$(printf '%s\n' "$t3_out" | sed -E "s#https?://[0-9]+(\\.[0-9]+){3}(:[0-9]+)?#${t3_public}#g")"
-      printf '%s\n' "$t3_rewritten"
-      t3_token="$(printf '%s\n' "$t3_rewritten" | awk '/^Token:/{print $2; exit}')"
-      if [[ -n "$t3_token" ]]; then
-        mkdir -p "$AGENTS_DIR/data/t3"
-        {
-          printf 'url=%s/pair#token=%s\n' "$t3_public" "$t3_token"
-          printf 'token=%s\n' "$t3_token"
-        } > "$AGENTS_DIR/data/t3/pairing.txt"
-        printf '\nPaste this token into the T3 pairing page.\n'
-        printf 'Token: %s\n' "$t3_token"
-        printf 'Host URL: %s/pair#token=%s\n' "$t3_public" "$t3_token"
-        printf 'Also written to %s\n' "$AGENTS_DIR/data/t3/pairing.txt"
+      # Image helper after rebuild; bind-mounted script works immediately.
+      t3_pair_bin=t3-pair
+      if ! "${COMPOSE[@]}" exec -T "$SERVICE" sh -c 'command -v t3-pair >/dev/null' 2>/dev/null; then
+        t3_pair_bin="bash $AGENTS_DIR/bin/t3-pair.sh"
       fi
-      exit "$t3_ec"
+      # shellcheck disable=SC2086
+      exec "${COMPOSE[@]}" exec -T \
+        -e "T3CODE_PUBLIC_URL=$t3_public" \
+        "$SERVICE" $t3_pair_bin "$@"
     fi
     # Default `t3 serve` binds 0.0.0.0:3773 so the compose publish reaches it.
     # If the entrypoint already started the UI, just print the URL.

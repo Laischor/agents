@@ -157,6 +157,7 @@ services:
       T3CODE_NO_BROWSER: "true"
       T3CODE_MODE: web
       T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "false"
+      T3CODE_PUBLIC_URL: ${T3CODE_PUBLIC_URL:-http://127.0.0.1:3773}
     volumes:
       # Same path as host so compose bind mounts resolve correctly
       - ${HOST_PROJECTS}:${HOST_PROJECTS}

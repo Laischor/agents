@@ -108,8 +108,8 @@ t3_serve_enabled() {
   esac
 }
 
-# Mint a pairing token after deploy. t3 prints a Docker-bridge URL; run.sh
-# rewrites it to T3CODE_PUBLIC_URL / http://127.0.0.1:3773.
+# Mint a pairing token after deploy. QR is rebuilt for T3CODE_PUBLIC_URL
+# (t3 itself encodes the Docker 172.x address).
 print_t3_pairing() {
   t3_serve_enabled || return 0
   local public="${T3CODE_PUBLIC_URL:-http://127.0.0.1:3773}"
