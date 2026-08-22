@@ -33,6 +33,7 @@ services:
       # Compose-network URL — Hermes web_search backend (search_backend: searxng)
       # Also persisted in data/hermes/.env so get_env_value sees it.
       SEARXNG_URL: http://searxng:8080
+      FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-http://firecrawl:3002}
       # macOS: gh stores OAuth in Keychain — start.sh/run.sh inject via `gh auth token`.
       # Hermes Skills Hub / github-auth read GITHUB_TOKEN (GH_TOKEN is the gh CLI name).
       GH_TOKEN: ${GH_TOKEN:-}
@@ -51,7 +52,7 @@ services:
       TERMINAL_DOCKER_IMAGE: agents:local
       TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "true"
       TERMINAL_CONTAINER_PERSISTENT: "true"
-      TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","GH_TOKEN","GITHUB_TOKEN","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR","AGENTS_GPU_DIR","AGENTS_CMUX_DIR","HOST_PROJECTS","CMUX_WORKSPACE_ID","CMUX_SURFACE_ID","CMUX_TAB_ID","CMUX_WINDOW_ID","SEARXNG_URL"]'
+      TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","GH_TOKEN","GITHUB_TOKEN","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR","AGENTS_GPU_DIR","AGENTS_CMUX_DIR","HOST_PROJECTS","CMUX_WORKSPACE_ID","CMUX_SURFACE_ID","CMUX_TAB_ID","CMUX_WINDOW_ID","SEARXNG_URL","FIRECRAWL_API_URL"]'
       # DISPLAY=:0 → Cursor CLI will call xclip stubs (no real X11 needed)
       TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard","AGENTS_GPU_DIR":"/var/agents-gpu","AGENTS_CMUX_DIR":"/var/agents-cmux","DISPLAY":":0"}'
       # Host-absolute bind mounts (compose interpolates before the container sees them)
@@ -111,6 +112,33 @@ services:
       - SETUID
       - DAC_OVERRIDE
 
+  # Opt-in scrape API (Firecrawl-shaped /v2/scrape). One container — official
+  # Firecrawl OSS needs Redis+RabbitMQ+Postgres+Playwright and is too heavy here.
+  # Image: Molx (https://github.com/ioi-labs/molx). Set FIRECRAWL=1.
+  firecrawl:
+    profiles: ["firecrawl"]
+    image: ghcr.io/ioi-labs/molx:latest
+    container_name: firecrawl
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${FIRECRAWL_PORT:-3002}:3002"
+    environment:
+      PORT: "3002"
+      # Empty = no auth (localhost only). Set FIRECRAWL_API_KEY to require Bearer.
+      API_KEY: ${FIRECRAWL_API_KEY:-}
+      TIMEOUT_MS: ${FIRECRAWL_TIMEOUT_MS:-60000}
+      # Optional LLM extract / onlyCleanContent
+      LLM_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
+      LLM_MODEL: ${FIRECRAWL_MODEL_NAME:-}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   agents:
     build:
       context: .
@@ -158,6 +186,8 @@ services:
       T3CODE_MODE: web
       T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "false"
       T3CODE_PUBLIC_URL: ${T3CODE_PUBLIC_URL:-http://127.0.0.1:3773}
+      # Self-hosted Firecrawl (profile firecrawl / FIRECRAWL=1)
+      FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-http://firecrawl:3002}
     volumes:
       # Same path as host so compose bind mounts resolve correctly
       - ${HOST_PROJECTS}:${HOST_PROJECTS}

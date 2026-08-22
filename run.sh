@@ -43,6 +43,13 @@ hermes_enabled() {
   esac
 }
 
+firecrawl_enabled() {
+  case "${FIRECRAWL:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # macOS: gh OAuth lives in Keychain, not in ~/.config/gh — inject for compose.
 if [[ -z "${GH_TOKEN:-}" ]] && command -v gh >/dev/null 2>&1; then
   if token="$(gh auth token 2>/dev/null)" && [[ -n "$token" ]]; then
@@ -76,14 +83,17 @@ ensure_services() {
     "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs" \
     "$AGENTS_DIR/data/cmux/sessions" \
     "$AGENTS_DIR/data/t3"
+  local compose_args=()
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes" "$AGENTS_DIR/data/open-webui"
     ensure_gh_passthrough
     reap_hermes_sandboxes
-    "${COMPOSE[@]}" --profile hermes up -d --quiet-pull
-  else
-    "${COMPOSE[@]}" up -d --quiet-pull
+    compose_args+=(--profile hermes)
   fi
+  if firecrawl_enabled; then
+    compose_args+=(--profile firecrawl)
+  fi
+  "${COMPOSE[@]}" "${compose_args[@]}" up -d --quiet-pull
 }
 
 # Host-side: mirror macOS clipboard PNGs into data/clipboard for container stubs.

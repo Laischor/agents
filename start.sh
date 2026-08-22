@@ -101,6 +101,24 @@ hermes_enabled() {
   esac
 }
 
+firecrawl_enabled() {
+  case "${FIRECRAWL:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Compose profile flags for currently enabled opt-in stacks.
+compose_profile_args() {
+  COMPOSE_PROFILES=()
+  if hermes_enabled; then
+    COMPOSE_PROFILES+=(--profile hermes)
+  fi
+  if firecrawl_enabled; then
+    COMPOSE_PROFILES+=(--profile firecrawl)
+  fi
+}
+
 t3_serve_enabled() {
   case "${AGENTS_T3_SERVE:-1}" in
     0|false|FALSE|no|NO|off|OFF) return 1 ;;
@@ -290,8 +308,9 @@ start_agents() {
     COMPOSE=(docker-compose -f "$COMPOSE_FILE")
   fi
 
+  local start_msg="Starte agents"
   if hermes_enabled; then
-    log "Starte agents + hermes (+ open-webui)…"
+    start_msg+=" + hermes (+ open-webui)"
     log "Entferne alte Hermes-Sandboxes (gh/git-Mounts neu)…"
     reap_hermes_sandboxes
     # Drop leftover community WebUI from older stacks (no longer in compose)
@@ -299,17 +318,29 @@ start_agents() {
       log "Entferne alten hermes-webui Container…"
       docker rm -f hermes-webui >/dev/null 2>&1 || true
     fi
-    "${COMPOSE[@]}" --profile hermes up -d --build
   else
-    log "Starte agents…"
     # Stop hermes profile services left from a previous HERMES=1 session
     if docker ps --format '{{.Names}}' | grep -Eqx 'hermes|open-webui|searxng|hermes-webui'; then
       log "HERMES=0 — stoppe hermes / open-webui / searxng…"
       "${COMPOSE[@]}" --profile hermes stop hermes open-webui searxng >/dev/null 2>&1 || true
       docker rm -f hermes-webui >/dev/null 2>&1 || true
     fi
-    "${COMPOSE[@]}" up -d --build
   fi
+  if firecrawl_enabled; then
+    start_msg+=" + firecrawl"
+    # Drop sidecars from the previous official 5-service stack
+    docker stop firecrawl-playwright firecrawl-redis firecrawl-rabbitmq firecrawl-postgres \
+      >/dev/null 2>&1 || true
+  elif docker ps --format '{{.Names}}' | grep -Eqx 'firecrawl|firecrawl-playwright|firecrawl-redis|firecrawl-rabbitmq|firecrawl-postgres'; then
+    log "FIRECRAWL=0 — stoppe Firecrawl…"
+    "${COMPOSE[@]}" --profile firecrawl stop firecrawl >/dev/null 2>&1 || true
+    # Leftovers from the previous 5-service official stack
+    docker stop firecrawl-playwright firecrawl-redis firecrawl-rabbitmq firecrawl-postgres \
+      >/dev/null 2>&1 || true
+  fi
+  log "${start_msg}…"
+  compose_profile_args
+  "${COMPOSE[@]}" "${COMPOSE_PROFILES[@]}" up -d --build
 
   log "Fertig. Beispiele: dagent | dpi | dclaude | dopencode | dt3 | agents-shell"
   print_t3_pairing
@@ -318,6 +349,9 @@ start_agents() {
     log "Open WebUI (Chat → Hermes): http://127.0.0.1:3000"
     log "Hermes Dashboard (Config): http://127.0.0.1:9119 (Login: ${HERMES_DASHBOARD_USER})"
     log "Hermes CLI: agents hermes-setup (einmalig) | agents hermes"
+  fi
+  if firecrawl_enabled; then
+    log "Firecrawl API: http://127.0.0.1:${FIRECRAWL_PORT:-3002}  (im Container: http://firecrawl:3002)"
   fi
 }
 
