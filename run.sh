@@ -233,14 +233,45 @@ fi
 # Screenshot paste: host bridge → xclip/wl-paste stubs (Claude + Cursor CLI + OpenCode).
 # cmux notifications: host cmux-bridge → container `cmux` stub.
 # DISPLAY=:0 is a no-op for Claude; Cursor only probes clipboard when DISPLAY is set.
+# OpenCode serve/web default to 127.0.0.1 + random port — Docker publish only
+# reaches the container eth0, so inject 0.0.0.0:4096 unless the user set them.
+# Keep the TUI path on "$@" — empty-array expansion breaks `set -u` on macOS bash 3.2.
 case "$cmd" in
-  claude|agent|cursor-agent|opencode)
+  claude|agent|cursor-agent)
     ensure_clipboard_bridge
     ensure_cmux_bridge
     exec "${COMPOSE[@]}" exec -it -w "$workdir" \
       -e "DISPLAY=${DISPLAY:-:0}" \
       "${CMUX_DOCKER_ENV[@]}" \
       "$SERVICE" "$cmd" "$@"
+    ;;
+  opencode)
+    ensure_clipboard_bridge
+    ensure_cmux_bridge
+    if [[ "${1:-}" == "serve" || "${1:-}" == "web" ]]; then
+      oc_sub="$1"
+      shift
+      oc_has_host=0
+      oc_has_port=0
+      for oc_a in "$@"; do
+        case "$oc_a" in
+          --hostname|--hostname=*) oc_has_host=1 ;;
+          --port|--port=*) oc_has_port=1 ;;
+        esac
+      done
+      oc_args=("$oc_sub")
+      [[ "$oc_has_host" -eq 1 ]] || oc_args+=(--hostname 0.0.0.0)
+      [[ "$oc_has_port" -eq 1 ]] || oc_args+=(--port 4096)
+      oc_args+=("$@")
+      exec "${COMPOSE[@]}" exec -it -w "$workdir" \
+        -e "DISPLAY=${DISPLAY:-:0}" \
+        "${CMUX_DOCKER_ENV[@]}" \
+        "$SERVICE" opencode "${oc_args[@]}"
+    fi
+    exec "${COMPOSE[@]}" exec -it -w "$workdir" \
+      -e "DISPLAY=${DISPLAY:-:0}" \
+      "${CMUX_DOCKER_ENV[@]}" \
+      "$SERVICE" opencode "$@"
     ;;
 esac
 

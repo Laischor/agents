@@ -72,6 +72,17 @@ agents-shell
 
 The launcher starts the container if needed and sets the working directory 1:1 to the host path.
 
+### OpenCode web / serve
+
+`opencode serve` and `opencode web` default to `127.0.0.1` and a random port. Docker port publish only reaches the container's eth0, so the launcher binds `0.0.0.0:4096` inside the container. The host mapping is localhost-only (`127.0.0.1:4096:4096`).
+
+```bash
+dopencode serve          # http://127.0.0.1:4096  (API)
+dopencode web            # same URL, with the web UI
+```
+
+Override with `--hostname` / `--port` if needed. Recreate `agents` from the **host** after changing the compose port mapping (`./start.sh`).
+
 ## GitHub CLI (`gh`)
 
 On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/.config/gh/hosts.yml`. Mounting that directory into Linux is not enough — and for Hermes it is harmful: the Docker sandbox bind-mounts a persist dir over `/root`, so a token-less host `~/.config/gh` hides any in-container login after a restart.

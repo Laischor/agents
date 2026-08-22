@@ -125,6 +125,8 @@ services:
     # Hard cap so thrash/OOM cannot freeze the whole long-lived container
     # Override via AGENTS_MEM_LIMIT in .env (e.g. 4g, 6g)
     mem_limit: ${AGENTS_MEM_LIMIT:-3g}
+    ports:
+      - "127.0.0.1:4096:4096"   # OpenCode serve/web (binds 0.0.0.0:4096 in-container)
     environment:
       # Cursor CLI
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}
