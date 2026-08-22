@@ -1,6 +1,6 @@
 # agents
 
-Docker environment for coding agents: **Cursor CLI**, **Pi**, **Claude Code**, and **OpenCode**.  
+Docker environment for coding agents: **Cursor CLI**, **Pi**, **Claude Code**, **OpenCode**, and **T3 Code**.  
 Also included: optional **Hermes Agent**, **Caveman**, and **CodeGraph**.  
 Projects stay on the host; agents run isolated in the container and drive Docker through the host socket.
 
@@ -46,6 +46,7 @@ dagent()     { agents agent "$@"; }
 dpi()        { agents pi "$@"; }
 dclaude()    { agents claude "$@"; }
 dopencode()  { agents opencode "$@"; }
+dt3()        { agents t3 "$@"; }
 dhermes()    { agents hermes "$@"; }
 dcodegraph() { agents codegraph "$@"; }
 agents-shell() { agents bash "$@"; }
@@ -65,6 +66,7 @@ dagent       # Cursor CLI
 dpi          # Pi
 dclaude      # Claude Code (Anthropic)
 dopencode    # OpenCode
+dt3          # T3 Code CLI (web UI auto-starts at :3773)
 dhermes      # Hermes Agent CLI (requires HERMES=1)
 dcodegraph   # CodeGraph CLI
 agents-shell
@@ -72,16 +74,29 @@ agents-shell
 
 The launcher starts the container if needed and sets the working directory 1:1 to the host path.
 
-### OpenCode web / serve
+### T3 Code web UI
 
-`opencode serve` and `opencode web` default to `127.0.0.1` and a random port. Docker port publish only reaches the container's eth0, so the launcher binds `0.0.0.0:4096` inside the container. The host mapping is localhost-only (`127.0.0.1:4096:4096`).
+The container starts a headless **T3 Code** server (`t3 serve`) that drives the already-installed Claude, Cursor, and OpenCode CLIs. Docker publish only reaches the container's eth0, so the server binds `0.0.0.0:3773` inside; the host mapping is localhost-only (`127.0.0.1:3773:3773`).
 
 ```bash
-dopencode serve          # http://127.0.0.1:4096  (API)
-dopencode web            # same URL, with the web UI
+# After ./start.sh from the host — pairing token is printed there, and:
+open http://127.0.0.1:3773
+dt3 pair                 # mint a new token (rewritten to localhost, saved in data/t3/pairing.txt)
+dt3 project add "$PWD"   # add a repo (paths must be under HOST_PROJECTS)
+dt3 --help
 ```
 
-Override with `--hostname` / `--port` if needed. Recreate `agents` from the **host** after changing the compose port mapping (`./start.sh`).
+T3 does not have a long-lived deploy password. Each browser/device needs a **one-time pairing token** minted on the running server:
+
+1. `./start.sh` waits for `:3773` and prints `Token:` plus `http://127.0.0.1:3773/pair#token=…`
+2. Later (or if you missed it): `dt3 pair` — same output, also `data/t3/pairing.txt`
+3. Paste the token into the pairing page, or open the **Host URL** (not the Docker `172.x` address)
+
+Tokens expire (default via `dt3 pair`: 1 hour) and are single-use. Remote access: set `T3CODE_PUBLIC_URL` (e.g. a Tailscale HTTPS URL) so pairing links are rewritten to that host instead of localhost.
+
+Set `AGENTS_T3_SERVE=0` in `.env` to skip auto-start, then `dt3 serve` when you want it. Recreate `agents` from the **host** after changing the compose port mapping (`./start.sh`).
+
+Turn on Cursor and OpenCode in T3 **Settings** (they ship off by default). Provider logins stay the existing CLIs (`claude auth login`, `agent login`, `opencode auth login`) inside the container.
 
 ## GitHub CLI (`gh`)
 
@@ -197,7 +212,7 @@ Docker requires dashboard basic auth — `./start.sh` writes `HERMES_DASHBOARD_U
 
 ### Terminal sandbox (`agents:local`)
 
-Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), **Pi**, **OpenCode**, and **`gh`** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, `data/opencode`, `~/.config/gh`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
+Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), **Pi**, **OpenCode**, **T3 Code** (`t3`), and **`gh`** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, `data/opencode`, `~/.config/gh`, …). The T3 **server** runs only in the `agents` container (not in the Hermes sandbox). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
 
 ## Persistence
 
@@ -215,6 +230,7 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 | `data/claude/`         | `/root/.claude` (`CLAUDE_CONFIG_DIR`) |
 | `data/opencode/`       | `/root/.local/share/opencode` (auth + sessions) |
 | `data/opencode-config/`| `/root/.config/opencode` |
+| `data/t3/`             | `/root/.t3` (T3 Code pairing, projects, threads) |
 | `data/clipboard/`      | `/var/agents-clipboard` (host PNG bridge for Claude/Cursor/OpenCode paste) |
 | `data/gpu/`            | `/var/agents-gpu` (host Blender/Godot job queue via gpu-bridge) |
 | `data/cmux/`           | `/var/agents-cmux` (host cmux notify/hooks queue via cmux-bridge) |
@@ -229,7 +245,7 @@ The `agents` container stays up for many `compose exec` / Hermes sessions. Each 
 
 - **`init: true`** — Docker’s tini as PID 1 reaps zombies
 - **`mem_limit`** — hard memory cap so thrash cannot freeze the whole container (default `3g` via `AGENTS_MEM_LIMIT`; Colima default `4g` via `COLIMA_MEMORY`)
-- **`agents-janitor`** — background loop (started once via the entrypoint) that kills *orphaned* `codegraph` trees with no living `claude` / Cursor / OpenCode parent; under low `MemAvailable` (&lt;256 MiB) it also drops the oldest orphans first. Log: `/var/log/agents-janitor.log`
+- **`agents-janitor`** — background loop (started once via the entrypoint) that kills *orphaned* `codegraph` trees with no living `claude` / Cursor / OpenCode / T3 parent; under low `MemAvailable` (&lt;256 MiB) it also drops the oldest orphans first. Log: `/var/log/agents-janitor.log`
 
 After changing these, rebuild/recreate from the **host** (`./start.sh` or `docker compose up -d --build agents`). Check: `docker compose exec agents ps -p 1 -o args=` (should show `docker-init` / tini) and `docker stats agents` (≈3 Gi limit).
 

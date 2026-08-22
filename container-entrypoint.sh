@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runtime setup for mounted agent configs (Pi packages, Claude plugins/MCP, Cursor/OpenCode MCP).
+# Runtime setup for mounted agent configs (Pi packages, Claude plugins/MCP, Cursor/OpenCode MCP, T3 serve).
 # Image build cannot write into volume-mounted ~/.pi / ~/.claude / ~/.cursor / ~/.config/opencode.
 
 set -u
@@ -349,6 +349,46 @@ ensure_agents_janitor() {
   printf '%s\n' "$!" >"$pid_file"
 }
 
+# Headless T3 Code web UI. Only the long-lived `agents` service sets
+# AGENTS_T3_SERVE=1 — Hermes sandboxes share the image but must not start a
+# second server (would fight over ~/.t3 sqlite).
+ensure_t3_serve() {
+  case "${AGENTS_T3_SERVE:-0}" in
+    1|true|TRUE|yes|YES|on|ON) ;;
+    *) return 0 ;;
+  esac
+
+  local pid_file="/var/run/t3-serve.pid"
+  local log_file="/var/log/t3-serve.log"
+  local serve="/usr/local/bin/t3-serve"
+
+  [[ -x "$serve" ]] || return 0
+  command -v t3 >/dev/null 2>&1 || return 0
+
+  mkdir -p /var/run /var/log /root/.t3/userdata
+
+  # t3-serve owns the pidfile; do not write it here (the child would see
+  # its own PID and exit before exec'ing `t3 serve`).
+  if [[ -f "$pid_file" ]]; then
+    local old
+    old="$(tr -d ' \n' <"$pid_file" 2>/dev/null || true)"
+    if [[ -n "$old" ]] && kill -0 "$old" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$pid_file"
+  fi
+
+  if pgrep -f '^(/usr/local/bin/)?t3-serve$' >/dev/null 2>&1 \
+    || pgrep -f '[t]3 serve' >/dev/null 2>&1 \
+    || pgrep -f '[b]in.mjs serve' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  printf 'Starting T3 Code web UI on %s:%s\n' \
+    "${T3CODE_HOST:-0.0.0.0}" "${T3CODE_PORT:-3773}"
+  nohup "$serve" >>"$log_file" 2>&1 &
+}
+
 ensure_git_identity
 
 ensure_pi_package "v2nic/pi-caveman" \
@@ -363,5 +403,6 @@ ensure_cursor_codegraph_mcp
 ensure_cursor_cmux_hooks
 ensure_opencode_codegraph_mcp
 ensure_agents_janitor
+ensure_t3_serve
 
 exec "$@"

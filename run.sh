@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch an agent CLI inside the agents container.
-# Usage: run.sh <agent|pi|claude|opencode|hermes|hermes-setup|cursor-agent|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]
+# Usage: run.sh <agent|pi|claude|opencode|t3|hermes|hermes-setup|cursor-agent|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]
 
 set -euo pipefail
 
@@ -74,7 +74,8 @@ ensure_services() {
     "$AGENTS_DIR/data/gpu/logs" \
     "$AGENTS_DIR/data/cmux/jobs" "$AGENTS_DIR/data/cmux/running" \
     "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs" \
-    "$AGENTS_DIR/data/cmux/sessions"
+    "$AGENTS_DIR/data/cmux/sessions" \
+    "$AGENTS_DIR/data/t3"
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes" "$AGENTS_DIR/data/open-webui"
     ensure_gh_passthrough
@@ -233,11 +234,9 @@ fi
 # Screenshot paste: host bridge → xclip/wl-paste stubs (Claude + Cursor CLI + OpenCode).
 # cmux notifications: host cmux-bridge → container `cmux` stub.
 # DISPLAY=:0 is a no-op for Claude; Cursor only probes clipboard when DISPLAY is set.
-# OpenCode serve/web default to 127.0.0.1 + random port — Docker publish only
-# reaches the container eth0, so inject 0.0.0.0:4096 unless the user set them.
 # Keep the TUI path on "$@" — empty-array expansion breaks `set -u` on macOS bash 3.2.
 case "$cmd" in
-  claude|agent|cursor-agent)
+  claude|agent|cursor-agent|opencode)
     ensure_clipboard_bridge
     ensure_cmux_bridge
     exec "${COMPOSE[@]}" exec -it -w "$workdir" \
@@ -245,33 +244,71 @@ case "$cmd" in
       "${CMUX_DOCKER_ENV[@]}" \
       "$SERVICE" "$cmd" "$@"
     ;;
-  opencode)
-    ensure_clipboard_bridge
-    ensure_cmux_bridge
-    if [[ "${1:-}" == "serve" || "${1:-}" == "web" ]]; then
-      oc_sub="$1"
+  t3)
+    # Pairing tokens are minted on demand. t3 prints the container IP
+    # (172.x); rewrite to the host publish URL so the token is usable.
+    if [[ "${1:-}" == "pair" ]]; then
       shift
-      oc_has_host=0
-      oc_has_port=0
-      for oc_a in "$@"; do
-        case "$oc_a" in
-          --hostname|--hostname=*) oc_has_host=1 ;;
-          --port|--port=*) oc_has_port=1 ;;
+      t3_has_base=0
+      t3_has_ttl=0
+      for t3_a in "$@"; do
+        case "$t3_a" in
+          --base-dir|--base-dir=*) t3_has_base=1 ;;
+          --ttl|--ttl=*) t3_has_ttl=1 ;;
         esac
       done
-      oc_args=("$oc_sub")
-      [[ "$oc_has_host" -eq 1 ]] || oc_args+=(--hostname 0.0.0.0)
-      [[ "$oc_has_port" -eq 1 ]] || oc_args+=(--port 4096)
-      oc_args+=("$@")
-      exec "${COMPOSE[@]}" exec -it -w "$workdir" \
-        -e "DISPLAY=${DISPLAY:-:0}" \
-        "${CMUX_DOCKER_ENV[@]}" \
-        "$SERVICE" opencode "${oc_args[@]}"
+      t3_pair_args=()
+      [[ "$t3_has_base" -eq 1 ]] || t3_pair_args+=(--base-dir /root/.t3)
+      [[ "$t3_has_ttl" -eq 1 ]] || t3_pair_args+=(--ttl 1h)
+      t3_pair_args+=("$@")
+      t3_out=""
+      t3_ec=0
+      t3_out="$("${COMPOSE[@]}" exec -T "$SERVICE" t3 pair "${t3_pair_args[@]}")" || t3_ec=$?
+      t3_public="${T3CODE_PUBLIC_URL:-http://127.0.0.1:3773}"
+      t3_public="${t3_public%/}"
+      t3_rewritten="$(printf '%s\n' "$t3_out" | sed -E "s#https?://[0-9]+(\\.[0-9]+){3}(:[0-9]+)?#${t3_public}#g")"
+      printf '%s\n' "$t3_rewritten"
+      t3_token="$(printf '%s\n' "$t3_rewritten" | awk '/^Token:/{print $2; exit}')"
+      if [[ -n "$t3_token" ]]; then
+        mkdir -p "$AGENTS_DIR/data/t3"
+        {
+          printf 'url=%s/pair#token=%s\n' "$t3_public" "$t3_token"
+          printf 'token=%s\n' "$t3_token"
+        } > "$AGENTS_DIR/data/t3/pairing.txt"
+        printf '\nPaste this token into the T3 pairing page.\n'
+        printf 'Token: %s\n' "$t3_token"
+        printf 'Host URL: %s/pair#token=%s\n' "$t3_public" "$t3_token"
+        printf 'Also written to %s\n' "$AGENTS_DIR/data/t3/pairing.txt"
+      fi
+      exit "$t3_ec"
     fi
-    exec "${COMPOSE[@]}" exec -it -w "$workdir" \
-      -e "DISPLAY=${DISPLAY:-:0}" \
-      "${CMUX_DOCKER_ENV[@]}" \
-      "$SERVICE" opencode "$@"
+    # Default `t3 serve` binds 0.0.0.0:3773 so the compose publish reaches it.
+    # If the entrypoint already started the UI, just print the URL.
+    if [[ $# -eq 0 || "${1:-}" == "serve" ]]; then
+      if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:3773/" 2>/dev/null; then
+        printf 'T3 Code web UI already running: http://127.0.0.1:3773\n'
+        printf 'Pairing / projects: dt3 pair | dt3 project add PATH\n'
+        exit 0
+      fi
+      if [[ "${1:-}" == "serve" ]]; then
+        shift
+      fi
+      t3_has_host=0
+      t3_has_port=0
+      for t3_a in "$@"; do
+        case "$t3_a" in
+          --host|--host=*) t3_has_host=1 ;;
+          --port|--port=*) t3_has_port=1 ;;
+        esac
+      done
+      t3_args=(serve)
+      [[ "$t3_has_host" -eq 1 ]] || t3_args+=(--host 0.0.0.0)
+      [[ "$t3_has_port" -eq 1 ]] || t3_args+=(--port 3773)
+      t3_args+=("$@")
+      exec "${COMPOSE[@]}" exec -it -w "$workdir" \
+        "$SERVICE" t3 "${t3_args[@]}"
+    fi
+    exec "${COMPOSE[@]}" exec -it -w "$workdir" "$SERVICE" t3 "$@"
     ;;
 esac
 

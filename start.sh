@@ -101,6 +101,31 @@ hermes_enabled() {
   esac
 }
 
+t3_serve_enabled() {
+  case "${AGENTS_T3_SERVE:-1}" in
+    0|false|FALSE|no|NO|off|OFF) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Mint a pairing token after deploy. t3 prints a Docker-bridge URL; run.sh
+# rewrites it to T3CODE_PUBLIC_URL / http://127.0.0.1:3773.
+print_t3_pairing() {
+  t3_serve_enabled || return 0
+  local public="${T3CODE_PUBLIC_URL:-http://127.0.0.1:3773}"
+  log "T3 Code Web-UI: $public"
+  local i
+  for i in {1..45}; do
+    if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:3773/" 2>/dev/null; then
+      log "T3 Pairing — Token in die Web-UI einfügen (oder dt3 pair):"
+      "$AGENTS_DIR/run.sh" t3 pair || log "T3 pair fehlgeschlagen — später: dt3 pair"
+      return 0
+    fi
+    sleep 1
+  done
+  log "T3 noch nicht erreichbar. Später: dt3 pair"
+}
+
 # shellcheck source=bin/ensure-gh-passthrough.sh
 source "$AGENTS_DIR/bin/ensure-gh-passthrough.sh"
 
@@ -114,6 +139,7 @@ ensure_data_dirs() {
     "$AGENTS_DIR/data/claude" \
     "$AGENTS_DIR/data/opencode" \
     "$AGENTS_DIR/data/opencode-config" \
+    "$AGENTS_DIR/data/t3" \
     "$AGENTS_DIR/data/clipboard" \
     "$AGENTS_DIR/data/gpu/jobs" \
     "$AGENTS_DIR/data/gpu/running" \
@@ -285,7 +311,8 @@ start_agents() {
     "${COMPOSE[@]}" up -d --build
   fi
 
-  log "Fertig. Beispiele: dagent | dpi | dclaude | dopencode | agents-shell"
+  log "Fertig. Beispiele: dagent | dpi | dclaude | dopencode | dt3 | agents-shell"
+  print_t3_pairing
   log "Screenshot-Paste: Bridge startet mit dagent/dclaude/dopencode (Ctrl+V, nicht Cmd+V)"
   if hermes_enabled; then
     log "Open WebUI (Chat → Hermes): http://127.0.0.1:3000"

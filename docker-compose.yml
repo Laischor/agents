@@ -126,7 +126,7 @@ services:
     # Override via AGENTS_MEM_LIMIT in .env (e.g. 4g, 6g)
     mem_limit: ${AGENTS_MEM_LIMIT:-3g}
     ports:
-      - "127.0.0.1:4096:4096"   # OpenCode serve/web (binds 0.0.0.0:4096 in-container)
+      - "127.0.0.1:3773:3773"   # T3 Code web UI (binds 0.0.0.0:3773 in-container)
     environment:
       # Cursor CLI
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}
@@ -149,6 +149,14 @@ services:
       AGENTS_CMUX_DIR: /var/agents-cmux
       # Dummy display so Cursor CLI enables linux clipboard image paste (xclip stubs)
       DISPLAY: ":0"
+      # T3 Code headless web UI (entrypoint starts `t3 serve` when 1)
+      AGENTS_T3_SERVE: ${AGENTS_T3_SERVE:-1}
+      T3CODE_HOST: "0.0.0.0"
+      T3CODE_PORT: "3773"
+      T3CODE_HOME: /root/.t3
+      T3CODE_NO_BROWSER: "true"
+      T3CODE_MODE: web
+      T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "false"
     volumes:
       # Same path as host so compose bind mounts resolve correctly
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
@@ -167,6 +175,8 @@ services:
       # OpenCode auth/sessions + global config (survive rebuild)
       - ./data/opencode:/root/.local/share/opencode
       - ./data/opencode-config:/root/.config/opencode
+      # T3 Code server state (pairing, projects, threads)
+      - ./data/t3:/root/.t3
       # macOS clipboard bridge drop dir (PNG for Claude/Cursor/OpenCode Ctrl+V paste)
       - ./data/clipboard:/var/agents-clipboard
       # macOS GPU job queue (Blender/Godot via gpu-bridge.sh)
