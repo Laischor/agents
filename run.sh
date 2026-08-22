@@ -157,15 +157,15 @@ CMUX_DOCKER_ENV=(
 
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
-  echo "usage: $(basename "$0") <agent|pi|claude|opencode|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]" >&2
+  echo "usage: $(basename "$0") <agent|pi|claude|opencode|t3|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]" >&2
   exit 1
 fi
 shift
 
 case "$cmd" in
-  agent|cursor-agent|pi|claude|opencode|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash) ;;
+  agent|cursor-agent|pi|claude|opencode|t3|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash) ;;
   *)
-    echo "unknown command: $cmd (expected agent, pi, claude, opencode, hermes, hermes-setup, codegraph, clipboard-bridge, gpu-bridge, cmux-bridge, or bash)" >&2
+    echo "unknown command: $cmd (expected agent, pi, claude, opencode, t3, hermes, hermes-setup, codegraph, clipboard-bridge, gpu-bridge, cmux-bridge, or bash)" >&2
     exit 1
     ;;
 esac
