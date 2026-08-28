@@ -356,6 +356,19 @@ def pane_busy(pane: str) -> bool:
     return bool(BUSY_RE.search(tail))
 
 
+def session_subagents(sess: dict[str, Any]) -> list[dict[str, Any]]:
+    """Claude only: subagents the parent jsonl still lists as running."""
+    if sess.get("agent") != "claude":
+        return []
+    raw = sess.get("transcript")
+    path = Path(raw) if raw else pick_transcript(sess)
+    if not path or not path.is_file():
+        return []
+    if sess.get("transcript") != str(path):
+        sess["transcript"] = str(path)
+    return tr.claude_subagents(path)
+
+
 def tmux_alive_command(name: str) -> str:
     r = tmux("display-message", "-t", name, "-p", "#{pane_current_command}")
     if r.returncode != 0:
@@ -976,10 +989,12 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
     live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or (
         sess["agent"] == "opencode" and bool(sess.get("oc_id"))
     )
+    subagents = session_subagents(sess)
     return {
         **session_meta(sess),
         "pane": pane,
-        "busy": busy,
+        "busy": busy or bool(subagents),
+        "subagents": subagents,
         "command": cmd,
         "messages": messages,
         "live": live,
@@ -1018,7 +1033,8 @@ def fingerprint(sess: dict[str, Any]) -> str:
         return f"looking:{len(files)}:{stamp}"
     try:
         st = path.stat()
-        return f"{st.st_mtime}:{st.st_size}:{sess.get('title') or ''}"
+        subs = ",".join(s["id"] for s in session_subagents(sess))
+        return f"{st.st_mtime}:{st.st_size}:{sess.get('title') or ''}:sa:{subs}"
     except OSError:
         return str(path)
 
@@ -1254,14 +1270,18 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
         )
         if not live:
             continue
+        subagents = session_subagents(sess)
         pub = {
             **session_meta(sess),
             "busy": False,
             "live": True,
+            "subagents": subagents,
         }
         if sess.get("tmux"):
             pane = tmux_capture(sess["tmux"])
-            pub["busy"] = pane_busy(pane)
+            pub["busy"] = pane_busy(pane) or bool(subagents)
+        elif subagents:
+            pub["busy"] = True
         out.append(pub)
     if changed:
         persist_state()
@@ -1556,19 +1576,28 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 fp = fingerprint(sess)
                 pane = tmux_capture(sess["tmux"]) if sess.get("tmux") else ""
+                subagents = session_subagents(sess)
+                busy = (pane_busy(pane) if pane else False) or bool(subagents)
+                pane_key = (pane, busy, tuple(s["id"] for s in subagents))
                 if fp != last:
                     last = fp
                     payload = session_public(sess)
                     chunk = f"event: sync\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     self.wfile.write(chunk.encode("utf-8"))
                     self.wfile.flush()
-                    last_pane = payload.get("pane")
-                elif pane != last_pane:
-                    last_pane = pane
-                    busy = pane_busy(pane)
+                    last_pane = (
+                        payload.get("pane"),
+                        bool(payload.get("busy")),
+                        tuple(s.get("id") for s in (payload.get("subagents") or [])),
+                    )
+                elif pane_key != last_pane:
+                    last_pane = pane_key
                     chunk = (
                         "event: pane\ndata: "
-                        + json.dumps({"pane": pane, "busy": busy}, ensure_ascii=False)
+                        + json.dumps(
+                            {"pane": pane, "busy": busy, "subagents": subagents},
+                            ensure_ascii=False,
+                        )
                         + "\n\n"
                     )
                     self.wfile.write(chunk.encode("utf-8"))

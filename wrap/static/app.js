@@ -176,6 +176,21 @@ function setStatus(msg) {
   el.textContent = text;
 }
 
+const narrowMq = window.matchMedia("(max-width: 800px)");
+function isNarrow() {
+  return narrowMq.matches;
+}
+function setMenuOpen(on) {
+  const open = Boolean(on) && isNarrow();
+  document.body.classList.toggle("menu-open", open);
+  $("scrim").hidden = !open;
+  $("btn-menu").setAttribute("aria-expanded", open ? "true" : "false");
+  $("btn-menu").textContent = open ? "Close" : "Sessions";
+}
+function closeMenu() {
+  setMenuOpen(false);
+}
+
 function applyChrome() {
   const live = Boolean(state.session);
   const draft = state.draft && !live;
@@ -207,6 +222,11 @@ function applyChrome() {
     state.paneOpen = false;
     $("tui").hidden = true;
   }
+  const title = $("mobile-title");
+  if (state.session) title.textContent = sessionLabel(state.session);
+  else if (state.draft) title.textContent = "New session";
+  else title.textContent = "wrap";
+  $("btn-menu").classList.toggle("ping", Boolean(state.pingSid));
   setHash();
 }
 
@@ -225,6 +245,7 @@ function openDraft() {
   applyChrome();
   renderSessions();
   $("project").focus();
+  closeMenu();
 }
 
 function clearMain() {
@@ -238,6 +259,7 @@ function clearMain() {
   clearAttachments();
   applyChrome();
   renderSessions();
+  if (isNarrow()) setMenuOpen(true);
 }
 
 function isWrapDefaultTitle(t) {
@@ -266,8 +288,18 @@ function sessionRow(s, onClick) {
   const bits = [agentLabel(s.agent)];
   const proj = projectName(s.cwd);
   if (proj && name !== proj) bits.push(proj);
+  const subs = s.subagents || [];
+  const n = subs.length;
+  let busy = "";
+  if (n) {
+    const word = n === 1 ? "1 subagent" : `${n} subagents`;
+    const labels = subs.map((x) => x.description || x.id).filter(Boolean).join(" · ");
+    busy = `<span class="busy"${labels ? ` title="${escapeHtml(labels)}"` : ""}>${escapeHtml(word)}</span> · `;
+  } else if (s.busy) {
+    busy = '<span class="busy">working</span> · ';
+  }
   li.innerHTML = `<button type="button"><span class="sess-title">${escapeHtml(name)}</span><span class="sess-meta">${
-    s.busy ? '<span class="busy">working</span> · ' : ""
+    busy
   }${escapeHtml(bits.filter(Boolean).join(" · "))}</span></button>`;
   li.querySelector("button").addEventListener("click", onClick);
   return li;
@@ -302,10 +334,10 @@ function renderSessions() {
   const showClosed = closed.length > 0;
   closedHead.hidden = !showClosed;
   closedUl.hidden = !showClosed;
-  if (!showClosed) return;
   for (const s of closed) {
     closedUl.appendChild(sessionRow(s, () => resumeHistory(s)));
   }
+  $("btn-menu").classList.toggle("ping", Boolean(state.pingSid));
 }
 
 async function loadSessions() {
@@ -389,6 +421,7 @@ function renderSession(sess) {
   }
   applyChrome();
   renderSessions();
+  closeMenu();
 }
 
 function renderMessages(messages) {
@@ -459,8 +492,13 @@ function connectStream(id) {
     try {
       const data = JSON.parse(ev.data);
       if (state.session) {
+        const wasBusy = state.session.busy;
         state.session.busy = data.busy;
         state.session.pane = data.pane;
+        if ("subagents" in data) state.session.subagents = data.subagents;
+        if (wasBusy !== data.busy) {
+          renderMessages(mergeMessages(state.session.messages || []));
+        }
       }
       $("pane").textContent = data.pane || "";
       if (state.paneOpen) $("pane").scrollTop = $("pane").scrollHeight;
@@ -826,6 +864,13 @@ $("model").addEventListener("change", savePrefs);
 $("effort").addEventListener("change", savePrefs);
 $("fast").addEventListener("change", savePrefs);
 $("btn-new").addEventListener("click", openDraft);
+$("btn-menu").addEventListener("click", () => {
+  setMenuOpen(!document.body.classList.contains("menu-open"));
+});
+$("scrim").addEventListener("click", closeMenu);
+narrowMq.addEventListener("change", () => {
+  if (!isNarrow()) closeMenu();
+});
 $("composer").addEventListener("submit", sendMessage);
 $("input").addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && !ev.shiftKey) {
@@ -859,6 +904,11 @@ $("tui").addEventListener("click", (e) => {
   if (state.paneOpen) $("pane").focus();
 });
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.body.classList.contains("menu-open")) {
+    e.preventDefault();
+    closeMenu();
+    return;
+  }
   if (e.isComposing) return;
   if (!state.paneOpen || !state.session?.tmux) return;
   if (e.target.closest("button, textarea, input, select")) return;
@@ -982,7 +1032,9 @@ function connectAlerts() {
 
 applyChrome();
 Promise.all([loadCatalog(), loadProjects(), loadHealth(), loadSessions()]).then(() => {
-  if ((location.hash || "#").slice(1)) onHash();
+  const id = (location.hash || "#").slice(1);
+  if (id) onHash();
+  else if (isNarrow()) setMenuOpen(true);
 });
 connectAlerts();
 setInterval(loadHealth, 15000);

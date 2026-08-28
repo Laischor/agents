@@ -2,11 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>wrap — native sessions</title>
-  <link rel="stylesheet" href="/static/style.css?v=8" />
+  <link rel="stylesheet" href="/static/style.css?v=10" />
 </head>
 <body>
+  <div id="scrim" hidden></div>
   <aside id="sidebar">
     <header class="brand">
       <div class="mark">w</div>
@@ -24,6 +25,10 @@
     <footer id="health"></footer>
   </aside>
   <main>
+    <header id="mobile-bar">
+      <button type="button" id="btn-menu" class="ghost" aria-label="Sessions" aria-controls="sidebar" aria-expanded="false">Sessions</button>
+      <strong id="mobile-title">wrap</strong>
+    </header>
     <div id="session-bar" hidden>
       <label>Project
         <select id="project"></select>
@@ -73,6 +78,6 @@
       </div>
     </form>
   </main>
-  <script src="/static/app.js?v=8"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

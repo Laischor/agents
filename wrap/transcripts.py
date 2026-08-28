@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from difflib import unified_diff
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,18 @@ TIMESTAMP_RE = re.compile(r"<timestamp>[\s\S]*?</timestamp>\s*")
 COMMAND_NAME_RE = re.compile(r"<command-name>([^<]+)</command-name>")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 WRAP_DEFAULT_TITLE_RE = re.compile(r" · (claude|cursor|opencode)( · |$)", re.I)
+HARNESS_USER_TAG_RE = re.compile(
+    r"^<(dynamic_tools|dynamic_tool_namespaces|system_notification|"
+    r"agent_transcripts|user_info|git_status|agent_skills|"
+    r"mcp_instructions|task-notification|local-command-stdout|"
+    r"local-command-stderr|manually_attached_skills)\b",
+    re.I,
+)
+FAKE_USER_QUERY_RE = re.compile(
+    r"^Briefly inform the user about the task result\b",
+    re.I,
+)
+INTERRUPT_RE = re.compile(r"^\[Request interrupted by user\]\s*$", re.I)
 MAX_DIFF_LINES = 220
 MAX_SIDE_LINES = 160
 
@@ -21,7 +34,13 @@ MAX_SIDE_LINES = 160
 def merge_turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse consecutive assistant rows (one JSONL line per tool round)."""
     merged: list[dict[str, Any]] = []
+    last_user_text = ""
     for msg in messages:
+        if msg["role"] == "user":
+            t = msg.get("text") or ""
+            if t and t == last_user_text:
+                continue
+            last_user_text = t
         if merged and msg["role"] == "assistant" and merged[-1]["role"] == "assistant":
             prev = merged[-1]
             if msg["text"]:
@@ -51,6 +70,16 @@ def extract_user_query(text: str) -> str:
     if cmd:
         return cmd.group(1).strip()
     return TIMESTAMP_RE.sub("", text).strip()
+
+
+def is_injected_user_message(text: str) -> bool:
+    """Harness / loop / tool notifications stored as role=user in native jsonl."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if FAKE_USER_QUERY_RE.match(t) or INTERRUPT_RE.match(t):
+        return True
+    return bool(HARNESS_USER_TAG_RE.match(t))
 
 
 def _clip_lines(text: str, max_lines: int = MAX_SIDE_LINES) -> str:
@@ -195,7 +224,11 @@ def parse_claude_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
             role = "user" if typ == "user" else "assistant"
             if role == "user":
                 origin = (rec.get("origin") or {}).get("kind")
-                if origin == "tool" or rec.get("toolUseResult") is not None:
+                if origin == "tool" or origin == "task-notification":
+                    continue
+                if rec.get("toolUseResult") is not None:
+                    continue
+                if is_injected_user_message(text):
                     continue
             out.append(
                 {
@@ -230,6 +263,8 @@ def parse_cursor_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
             text, tools, diffs = _content_blocks(msg.get("content"))
             if text is None or (not text and not tools and not diffs):
                 continue
+            if role == "user" and is_injected_user_message(text):
+                continue
             ts = ""
             if isinstance(msg.get("content"), list):
                 for block in msg["content"]:
@@ -255,6 +290,118 @@ def parse_jsonl(agent: str, path: Path, limit: int = 300) -> list[dict[str, Any]
     if agent == "cursor":
         return parse_cursor_jsonl(path, limit)
     return parse_claude_jsonl(path, limit)
+
+
+TASK_ID_RE = re.compile(r"<task-id>([^<]+)</task-id>")
+TASK_STATUS_RE = re.compile(r"<status>([^<]+)</status>")
+SUBAGENT_DONE = frozenset({"completed", "killed", "failed", "stopped", "cancelled", "error"})
+# Sidecar jsonl goes quiet if the child died without a task-notification.
+# Parent jsonl stays idle the whole time a child runs, so only the sidecar mtime counts.
+SUBAGENT_STALE_SEC = 45 * 60
+_SUBAGENT_CACHE: dict[str, tuple[int, int, tuple[tuple[str, str, bool], ...]]] = {}
+
+
+def _subagent_note(blob: str) -> tuple[str, str] | None:
+    if "<task-id>" not in blob:
+        return None
+    tid = TASK_ID_RE.search(blob)
+    if not tid:
+        return None
+    st = TASK_STATUS_RE.search(blob)
+    return tid.group(1), (st.group(1).strip() if st else "")
+
+
+def _scan_claude_subagents(path: Path) -> tuple[tuple[str, str, bool], ...]:
+    """Last event per agentId: (id, description, running)."""
+    agents: dict[str, tuple[str, str, bool]] = {}
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            tur = rec.get("toolUseResult")
+            if isinstance(tur, dict) and tur.get("agentId"):
+                aid = str(tur["agentId"])
+                desc = str(tur.get("description") or agents.get(aid, ("", "", False))[1] or "")
+                st = str(tur.get("status") or "")
+                agents[aid] = (aid, desc, st == "async_launched")
+            typ = rec.get("type")
+            msg = rec.get("message") or {}
+            content = msg.get("content")
+            if typ == "assistant" and isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    if block.get("name") != "SendMessage":
+                        continue
+                    inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    aid = str(inp.get("to") or "").strip()
+                    if not aid:
+                        continue
+                    prev = agents.get(aid)
+                    desc = prev[1] if prev else ""
+                    agents[aid] = (aid, desc, True)
+            blob = ""
+            if typ == "queue-operation" and isinstance(rec.get("content"), str):
+                blob = rec["content"]
+            elif isinstance(content, str):
+                blob = content
+            elif isinstance(rec.get("content"), str) and "<task-id>" in rec["content"]:
+                blob = rec["content"]
+            note = _subagent_note(blob)
+            if note and note[1] in SUBAGENT_DONE:
+                aid, _st = note
+                prev = agents.get(aid)
+                desc = prev[1] if prev else ""
+                agents[aid] = (aid, desc, False)
+    return tuple(agents.values())
+
+
+def claude_subagents(path: Path) -> list[dict[str, Any]]:
+    """Subagents still running according to a Claude parent jsonl.
+
+    Launch: toolUseResult.status == async_launched.
+    Resume: SendMessage to that agentId.
+    Stop: task-notification / toolUseResult status completed|killed|failed.
+    .meta.json has no status — do not use it.
+    """
+    if not path.is_file():
+        return []
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    key = str(path)
+    stamp = (int(st.st_mtime_ns), int(st.st_size))
+    hit = _SUBAGENT_CACHE.get(key)
+    if hit and hit[0] == stamp[0] and hit[1] == stamp[1]:
+        rows = hit[2]
+    else:
+        rows = _scan_claude_subagents(path)
+        _SUBAGENT_CACHE[key] = (stamp[0], stamp[1], rows)
+        if len(_SUBAGENT_CACHE) > 128:
+            for old in list(_SUBAGENT_CACHE)[:64]:
+                if old != key:
+                    _SUBAGENT_CACHE.pop(old, None)
+    now = time.time()
+    sub_dir = path.parent / path.stem / "subagents"
+    out: list[dict[str, Any]] = []
+    for aid, desc, running in rows:
+        if not running:
+            continue
+        side = sub_dir / f"agent-{aid}.jsonl"
+        try:
+            fresh = now - side.stat().st_mtime < SUBAGENT_STALE_SEC
+        except OSError:
+            fresh = now - st.st_mtime < SUBAGENT_STALE_SEC
+        if not fresh:
+            continue
+        out.append({"id": aid, "description": desc, "running": True})
+    return out
 
 
 def claude_project_dir(cwd: Path, claude_home: Path) -> Path:
