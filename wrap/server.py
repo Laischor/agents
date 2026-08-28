@@ -369,6 +369,29 @@ def session_subagents(sess: dict[str, Any]) -> list[dict[str, Any]]:
     return tr.claude_subagents(path)
 
 
+def session_choice(sess: dict[str, Any]) -> dict[str, Any] | None:
+    agent = str(sess.get("agent") or "")
+    if agent not in ("claude", "cursor"):
+        return None
+    raw = sess.get("transcript")
+    path = Path(raw) if raw else pick_transcript(sess)
+    if not path or not path.is_file():
+        return None
+    if sess.get("transcript") != str(path):
+        sess["transcript"] = str(path)
+    return tr.pending_choice(agent, path)
+
+
+def send_choice_keys(name: str, picks: list[int]) -> None:
+    """Drive the CLI select UI: arrows to the option, Tab between questions, Enter."""
+    for i, opt in enumerate(picks):
+        keys = ["Up"] * 8 + ["Down"] * max(opt, 0)
+        keys.append("Tab" if i < len(picks) - 1 else "Enter")
+        tmux_send_keys(name, keys)
+        if i < len(picks) - 1:
+            time.sleep(0.15)
+
+
 def tmux_alive_command(name: str) -> str:
     r = tmux("display-message", "-t", name, "-p", "#{pane_current_command}")
     if r.returncode != 0:
@@ -990,11 +1013,13 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
         sess["agent"] == "opencode" and bool(sess.get("oc_id"))
     )
     subagents = session_subagents(sess)
+    choice = session_choice(sess)
     return {
         **session_meta(sess),
         "pane": pane,
-        "busy": busy or bool(subagents),
+        "busy": busy or bool(subagents) or bool(choice),
         "subagents": subagents,
+        "choice": choice,
         "command": cmd,
         "messages": messages,
         "live": live,
@@ -1034,7 +1059,8 @@ def fingerprint(sess: dict[str, Any]) -> str:
     try:
         st = path.stat()
         subs = ",".join(s["id"] for s in session_subagents(sess))
-        return f"{st.st_mtime}:{st.st_size}:{sess.get('title') or ''}:sa:{subs}"
+        ch = (session_choice(sess) or {}).get("id") or ""
+        return f"{st.st_mtime}:{st.st_size}:{sess.get('title') or ''}:sa:{subs}:ch:{ch}"
     except OSError:
         return str(path)
 
@@ -1271,16 +1297,18 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
         if not live:
             continue
         subagents = session_subagents(sess)
+        choice = session_choice(sess)
         pub = {
             **session_meta(sess),
             "busy": False,
             "live": True,
             "subagents": subagents,
+            "choice": choice,
         }
         if sess.get("tmux"):
             pane = tmux_capture(sess["tmux"])
-            pub["busy"] = pane_busy(pane) or bool(subagents)
-        elif subagents:
+            pub["busy"] = pane_busy(pane) or bool(subagents) or bool(choice)
+        elif subagents or choice:
             pub["busy"] = True
         out.append(pub)
     if changed:
@@ -1478,6 +1506,33 @@ class Handler(BaseHTTPRequestHandler):
                     tmux_send_keys(sess["tmux"], ["Escape"])
                 else:
                     raise RuntimeError("nothing to interrupt")
+                st, raw, ct = json_bytes({"ok": True})
+                return self._send(st, raw, ct)
+            m = re.fullmatch(r"/api/sessions/([^/]+)/choose", path)
+            if m:
+                sess = get_session(m.group(1))
+                if not sess.get("tmux"):
+                    raise RuntimeError("no tmux pane for this session")
+                choice = session_choice(sess)
+                if not choice:
+                    raise ValueError("no pending choice")
+                questions = choice.get("questions") or []
+                picks = data.get("picks")
+                if picks is None and data.get("option") is not None:
+                    picks = [data.get("option")]
+                if not isinstance(picks, list) or len(picks) != len(questions):
+                    raise ValueError("picks must have one index per question")
+                idxs: list[int] = []
+                for i, raw in enumerate(picks):
+                    try:
+                        n = int(raw)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("picks must be integers") from exc
+                    opts = (questions[i] or {}).get("options") or []
+                    if n < 0 or n >= len(opts):
+                        raise ValueError("option out of range")
+                    idxs.append(n)
+                send_choice_keys(str(sess["tmux"]), idxs)
                 st, raw, ct = json_bytes({"ok": True})
                 return self._send(st, raw, ct)
             self._send(404, b'{"error":"not found"}', "application/json")

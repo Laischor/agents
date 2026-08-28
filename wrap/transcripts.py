@@ -42,18 +42,21 @@ def merge_turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
             last_user_text = t
         if merged and msg["role"] == "assistant" and merged[-1]["role"] == "assistant":
-            prev = merged[-1]
-            if msg["text"]:
-                prev["text"] = f"{prev['text']}\n\n{msg['text']}".strip() if prev["text"] else msg["text"]
-            for tool in msg["tools"]:
-                if tool not in prev["tools"]:
-                    prev["tools"].append(tool)
-            for diff in msg.get("diffs") or []:
-                if diff not in prev["diffs"]:
-                    prev["diffs"].append(diff)
+            _extend_parts(merged[-1].setdefault("parts", []), msg.get("parts") or [])
             continue
-        merged.append({**msg, "tools": list(msg["tools"]), "diffs": list(msg.get("diffs") or [])})
+        merged.append({**msg, "parts": [dict(p) for p in (msg.get("parts") or [])]})
     return merged
+
+
+def _extend_parts(dst: list[dict[str, Any]], src: list[dict[str, Any]]) -> None:
+    for raw in src:
+        part = dict(raw)
+        if part.get("type") == "text" and dst and dst[-1].get("type") == "text":
+            prev = dst[-1].get("text") or ""
+            nxt = part.get("text") or ""
+            dst[-1]["text"] = f"{prev}\n\n{nxt}".strip() if prev else nxt
+            continue
+        dst.append(part)
 
 
 def strip_ansi(text: str) -> str:
@@ -157,19 +160,19 @@ def diffs_from_tool(name: str, inp: Any) -> list[dict[str, str]]:
     return out
 
 
-def _content_blocks(content: Any) -> tuple[str | None, list[str], list[dict[str, str]]]:
-    """Return (text or None to skip, tool names, code diffs)."""
-    tools: list[str] = []
-    diffs: list[dict[str, str]] = []
+def _content_parts(content: Any, *, as_user: bool = False) -> list[dict[str, Any]] | None:
+    """Ordered text / diff / tool parts. None means skip the record."""
     if content is None:
-        return "", tools, diffs
+        return []
     if isinstance(content, str):
         if "local-command-caveat" in content:
-            return None, tools, diffs
-        return extract_user_query(content), tools, diffs
+            return None
+        text = extract_user_query(content) if as_user else content.strip()
+        return [{"type": "text", "text": text}] if text else []
     if not isinstance(content, list):
-        return str(content), tools, diffs
-    texts: list[str] = []
+        text = str(content)
+        return [{"type": "text", "text": text}] if text else []
+    parts: list[dict[str, Any]] = []
     saw_tool_result = False
     for block in content:
         if not isinstance(block, dict):
@@ -177,24 +180,30 @@ def _content_blocks(content: Any) -> tuple[str | None, list[str], list[dict[str,
         kind = block.get("type")
         if kind == "text":
             t = block.get("text") or ""
+            if as_user:
+                t = extract_user_query(t)
+            t = (t or "").strip()
             if t:
-                texts.append(t)
+                parts.append({"type": "text", "text": t})
         elif kind == "tool_use":
             name = str(block.get("name") or "tool")
             hunks = diffs_from_tool(name, block.get("input"))
             if hunks:
-                diffs.extend(hunks)
+                for h in hunks:
+                    parts.append({"type": "diff", **h})
             else:
-                tools.append(name)
+                parts.append({"type": "tool", "name": name})
         elif kind == "tool_result":
             saw_tool_result = True
         elif kind == "thinking":
             continue
-    if saw_tool_result and not texts and not diffs:
-        return None, tools, diffs
-    joined = "\n".join(texts).strip()
-    text = extract_user_query(joined) if joined else ""
-    return text, tools, diffs
+    if saw_tool_result and not parts:
+        return None
+    return parts
+
+
+def _parts_text(parts: list[dict[str, Any]]) -> str:
+    return "\n\n".join(p.get("text") or "" for p in parts if p.get("type") == "text").strip()
 
 
 def parse_claude_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
@@ -216,12 +225,13 @@ def parse_claude_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
             if typ not in ("user", "assistant"):
                 continue
             msg = rec.get("message") or {}
-            text, tools, diffs = _content_blocks(msg.get("content"))
-            if text is None:
-                continue
-            if not text and not tools and not diffs:
-                continue
             role = "user" if typ == "user" else "assistant"
+            parts = _content_parts(msg.get("content"), as_user=(role == "user"))
+            if parts is None:
+                continue
+            if not parts:
+                continue
+            text = _parts_text(parts)
             if role == "user":
                 origin = (rec.get("origin") or {}).get("kind")
                 if origin == "tool" or origin == "task-notification":
@@ -235,8 +245,7 @@ def parse_claude_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
                     "id": rec.get("uuid") or f"L{i}",
                     "role": role,
                     "text": text,
-                    "tools": tools,
-                    "diffs": diffs,
+                    "parts": parts,
                     "ts": rec.get("timestamp") or "",
                 }
             )
@@ -260,9 +269,10 @@ def parse_cursor_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
             if role not in ("user", "assistant"):
                 continue
             msg = rec.get("message") or rec
-            text, tools, diffs = _content_blocks(msg.get("content"))
-            if text is None or (not text and not tools and not diffs):
+            parts = _content_parts(msg.get("content"), as_user=(role == "user"))
+            if parts is None or not parts:
                 continue
+            text = _parts_text(parts)
             if role == "user" and is_injected_user_message(text):
                 continue
             ts = ""
@@ -278,8 +288,7 @@ def parse_cursor_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
                     "id": rec.get("id") or f"L{i}",
                     "role": role,
                     "text": text,
-                    "tools": tools,
-                    "diffs": diffs,
+                    "parts": parts,
                     "ts": ts,
                 }
             )
@@ -404,6 +413,129 @@ def claude_subagents(path: Path) -> list[dict[str, Any]]:
     return out
 
 
+ASK_TOOLS = frozenset({"AskUserQuestion", "AskQuestion"})
+_CHOICE_CACHE: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
+
+
+def _choice_from_tool(block: dict[str, Any]) -> dict[str, Any] | None:
+    if block.get("type") != "tool_use" or block.get("name") not in ASK_TOOLS:
+        return None
+    inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+    questions: list[dict[str, Any]] = []
+    for raw in inp.get("questions") or []:
+        if not isinstance(raw, dict):
+            continue
+        options: list[dict[str, str]] = []
+        for opt in raw.get("options") or []:
+            if not isinstance(opt, dict):
+                continue
+            label = str(opt.get("label") or opt.get("id") or "").strip()
+            if not label:
+                continue
+            options.append(
+                {
+                    "id": str(opt.get("id") or ""),
+                    "label": label,
+                    "description": str(opt.get("description") or "").strip(),
+                }
+            )
+        if len(options) < 2:
+            continue
+        questions.append(
+            {
+                "id": str(raw.get("id") or ""),
+                "header": str(raw.get("header") or "").strip(),
+                "prompt": str(raw.get("question") or raw.get("prompt") or "").strip(),
+                "multi": bool(raw.get("multiSelect") or raw.get("allow_multiple")),
+                "options": options,
+            }
+        )
+    if not questions:
+        return None
+    return {
+        "id": str(block.get("id") or block.get("name") or "ask"),
+        "title": str(inp.get("title") or "").strip(),
+        "questions": questions,
+    }
+
+
+def _scan_pending_choice(agent: str, path: Path) -> dict[str, Any] | None:
+    pending: dict[str, Any] | None = None
+    open_ids: set[str] = set()
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            typ = rec.get("type")
+            role = rec.get("role") or (rec.get("message") or {}).get("role")
+            msg = rec.get("message") or {}
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if typ == "assistant" or role == "assistant":
+                found = False
+                if isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        choice = _choice_from_tool(block)
+                        if not choice:
+                            continue
+                        found = True
+                        pending = choice
+                        open_ids.add(choice["id"])
+                if agent == "cursor" and pending and not found:
+                    pending = None
+                    open_ids.clear()
+            if typ == "user" or role == "user":
+                if isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict) or block.get("type") != "tool_result":
+                            continue
+                        tid = str(block.get("tool_use_id") or "")
+                        if tid and tid in open_ids:
+                            open_ids.discard(tid)
+                            if pending and pending.get("id") == tid:
+                                pending = None
+                if agent == "cursor":
+                    blob = content if isinstance(content, str) else ""
+                    if isinstance(content, list):
+                        blob = "\n".join(
+                            str(b.get("text") or "") for b in content if isinstance(b, dict)
+                        )
+                    if USER_QUERY_RE.search(blob or "") and not is_injected_user_message(
+                        extract_user_query(blob)
+                    ):
+                        pending = None
+                        open_ids.clear()
+    return pending
+
+
+def pending_choice(agent: str, path: Path) -> dict[str, Any] | None:
+    """Unanswered AskUserQuestion / AskQuestion in a parent jsonl."""
+    if agent not in ("claude", "cursor") or not path.is_file():
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = f"{agent}:{path}"
+    stamp = (int(st.st_mtime_ns), int(st.st_size))
+    hit = _CHOICE_CACHE.get(key)
+    if hit and hit[0] == stamp[0] and hit[1] == stamp[1]:
+        return hit[2]
+    found = _scan_pending_choice(agent, path)
+    _CHOICE_CACHE[key] = (stamp[0], stamp[1], found)
+    if len(_CHOICE_CACHE) > 128:
+        for old in list(_CHOICE_CACHE)[:64]:
+            if old != key:
+                _CHOICE_CACHE.pop(old, None)
+    return found
+
+
 def claude_project_dir(cwd: Path, claude_home: Path) -> Path:
     encoded = str(cwd).replace("/", "-")
     return claude_home / "projects" / encoded
@@ -474,31 +606,29 @@ def parse_opencode_session(db_path: Path, session_id: str, limit: int = 300) -> 
         except json.JSONDecodeError:
             continue
         role = info.get("role") or "assistant"
-        texts: list[str] = []
-        tools: list[str] = []
-        diffs: list[dict[str, str]] = []
+        parts: list[dict[str, Any]] = []
         for part in by_msg.get(row["id"], []):
             kind = part.get("type")
             if kind == "text" and part.get("text"):
-                texts.append(part["text"])
+                parts.append({"type": "text", "text": part["text"]})
             elif kind == "tool":
                 tool = str(part.get("tool") or part.get("name") or "tool")
                 st = part.get("state") if isinstance(part.get("state"), dict) else {}
                 inp = st.get("input") if isinstance(st.get("input"), dict) else part.get("input")
                 hunks = diffs_from_tool(tool, inp)
                 if hunks:
-                    diffs.extend(hunks)
+                    for h in hunks:
+                        parts.append({"type": "diff", **h})
                 else:
-                    tools.append(tool)
-        if not texts and not tools and not diffs:
+                    parts.append({"type": "tool", "name": tool})
+        if not parts:
             continue
         out.append(
             {
                 "id": row["id"],
                 "role": "user" if role == "user" else "assistant",
-                "text": "\n\n".join(texts),
-                "tools": tools,
-                "diffs": diffs,
+                "text": _parts_text(parts),
+                "parts": parts,
                 "ts": row["time_created"],
             }
         )

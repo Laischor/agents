@@ -243,6 +243,7 @@ function openDraft() {
   $("log").innerHTML = `<div class="empty">Pick a project and agent, then send a message</div>`;
   setStatus("");
   applyChrome();
+  renderChoice(null);
   renderSessions();
   $("project").focus();
   closeMenu();
@@ -258,6 +259,7 @@ function clearMain() {
   state.paneOpen = false;
   clearAttachments();
   applyChrome();
+  renderChoice(null);
   renderSessions();
   if (isNarrow()) setMenuOpen(true);
 }
@@ -291,7 +293,9 @@ function sessionRow(s, onClick) {
   const subs = s.subagents || [];
   const n = subs.length;
   let busy = "";
-  if (n) {
+  if (s.choice) {
+    busy = '<span class="busy">choose</span> · ';
+  } else if (n) {
     const word = n === 1 ? "1 subagent" : `${n} subagents`;
     const labels = subs.map((x) => x.description || x.id).filter(Boolean).join(" · ");
     busy = `<span class="busy"${labels ? ` title="${escapeHtml(labels)}"` : ""}>${escapeHtml(word)}</span> · `;
@@ -410,6 +414,7 @@ function renderSession(sess) {
   applyCatalog();
   setStatus("");
   renderMessages(mergeMessages(sess.messages || []));
+  renderChoice(sess.choice);
   if (sess.tmux) {
     $("pane").textContent = sess.pane || "";
     if (state.paneOpen) {
@@ -446,32 +451,124 @@ function renderMessages(messages) {
       (m.role === "assistant" && state.session?.busy ? `<span class="busy-dot"></span>` : "") +
       (m.pending ? "queued" : m.role);
     el.appendChild(who);
-    if (m.text) {
-      el.appendChild(renderMessageBody(m.text));
-    }
-    for (const d of m.diffs || []) {
-      const box = document.createElement("div");
-      box.className = "diff";
-      const head = document.createElement("div");
-      head.className = "diff-head";
-      const file = String(d.path || "").split("/").filter(Boolean).pop() || d.path || "file";
-      head.textContent = (d.kind === "write" ? "write " : "") + file;
-      if (d.path && file !== d.path) head.title = d.path;
-      const pre = document.createElement("pre");
-      pre.innerHTML = renderDiff(d.diff || "");
-      box.appendChild(head);
-      box.appendChild(pre);
-      el.appendChild(box);
-    }
-    if (m.tools && m.tools.length) {
+    const parts = messageParts(m);
+    let toolBuf = [];
+    const flushTools = () => {
+      if (!toolBuf.length) return;
       const tools = document.createElement("div");
       tools.className = "tools";
-      tools.textContent = m.tools.join(" · ");
+      tools.textContent = toolBuf.join(" · ");
       el.appendChild(tools);
+      toolBuf = [];
+    };
+    for (const p of parts) {
+      if (p.type === "tool") {
+        if (p.name) toolBuf.push(p.name);
+        continue;
+      }
+      flushTools();
+      if (p.type === "text" && p.text) el.appendChild(renderMessageBody(p.text));
+      else if (p.type === "diff") el.appendChild(renderDiffBox(p));
     }
+    flushTools();
     log.appendChild(el);
   }
   log.scrollTop = log.scrollHeight;
+}
+
+function messageParts(m) {
+  if (m.parts && m.parts.length) return m.parts;
+  const out = [];
+  if (m.text) out.push({ type: "text", text: m.text });
+  for (const d of m.diffs || []) out.push({ type: "diff", ...d });
+  for (const name of m.tools || []) out.push({ type: "tool", name });
+  return out;
+}
+
+function renderDiffBox(d) {
+  const box = document.createElement("div");
+  box.className = "diff";
+  const head = document.createElement("div");
+  head.className = "diff-head";
+  const file = String(d.path || "").split("/").filter(Boolean).pop() || d.path || "file";
+  head.textContent = (d.kind === "write" ? "write " : "") + file;
+  if (d.path && file !== d.path) head.title = d.path;
+  const pre = document.createElement("pre");
+  pre.innerHTML = renderDiff(d.diff || "");
+  box.appendChild(head);
+  box.appendChild(pre);
+  return box;
+}
+
+function renderChoice(choice) {
+  const el = $("choice");
+  if (!choice || !choice.questions || !choice.questions.length) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "choice-title";
+  title.textContent = choice.title || "Choose";
+  el.appendChild(title);
+  const questions = choice.questions;
+  const picks = questions.map(() => -1);
+  const single = questions.length === 1 && !questions.some((q) => q.multi);
+  questions.forEach((q, qi) => {
+    const box = document.createElement("div");
+    box.className = "choice-q";
+    const prompt = document.createElement("div");
+    prompt.className = "choice-prompt";
+    prompt.textContent = [q.header, q.prompt].filter(Boolean).join(" — ") || "Question";
+    box.appendChild(prompt);
+    const opts = document.createElement("div");
+    opts.className = "choice-opts";
+    (q.options || []).forEach((opt, oi) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "choice-opt";
+      btn.innerHTML = escapeHtml(opt.label || "") +
+        (opt.description ? `<small>${escapeHtml(opt.description)}</small>` : "");
+      btn.addEventListener("click", () => {
+        picks[qi] = oi;
+        opts.querySelectorAll(".choice-opt").forEach((b, i) => b.classList.toggle("on", i === oi));
+        if (single) submitChoice(picks);
+        else {
+          const go = el.querySelector(".choice-submit");
+          if (go) go.disabled = picks.some((n) => n < 0);
+        }
+      });
+      opts.appendChild(btn);
+    });
+    box.appendChild(opts);
+    el.appendChild(box);
+  });
+  if (!single) {
+    const go = document.createElement("button");
+    go.type = "button";
+    go.className = "choice-submit";
+    go.textContent = "Submit";
+    go.disabled = true;
+    go.addEventListener("click", () => submitChoice(picks));
+    el.appendChild(go);
+  }
+}
+
+async function submitChoice(picks) {
+  if (!state.session || picks.some((n) => n < 0)) return;
+  const el = $("choice");
+  el.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+  try {
+    await api(`/api/sessions/${state.session.id}/choose`, {
+      method: "POST",
+      body: JSON.stringify({ picks }),
+    });
+  } catch (err) {
+    el.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+    setStatus(err.message || String(err));
+  }
 }
 
 function connectStream(id) {

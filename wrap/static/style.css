@@ -263,6 +263,47 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   background: #0e0f0b;
 }
 
+#choice {
+  margin: 0 24px 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-2);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+#choice[hidden] { display: none !important; }
+#choice .choice-title {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+#choice .choice-q { display: flex; flex-direction: column; gap: 8px; }
+#choice .choice-prompt { font-size: 14px; line-height: 1.4; }
+#choice .choice-opts { display: flex; flex-direction: column; gap: 6px; }
+#choice .choice-opt {
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg-3);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+#choice .choice-opt:hover { border-color: var(--accent); }
+#choice .choice-opt.on { border-color: var(--accent); background: var(--accent); color: #1a160c; }
+#choice .choice-opt small {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 400;
+}
+#choice .choice-opt.on small { color: inherit; opacity: 0.8; }
+#choice .choice-submit { align-self: flex-start; }
 #composer {
   padding: 12px 24px 20px; border-top: 1px solid var(--line);
   display: flex; flex-direction: column; gap: 8px;
@@ -344,6 +385,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   .log { padding: 14px 14px 10px; -webkit-overflow-scrolling: touch; }
   #lists { -webkit-overflow-scrolling: touch; }
   #session-bar select, #input { font-size: 16px; }
+  #choice { margin: 0 14px 8px; }
   #composer {
     padding: 10px 14px max(12px, env(safe-area-inset-bottom));
   }
