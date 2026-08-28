@@ -6,6 +6,7 @@ No extra model harness — the CLI process is the only API client.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -17,6 +18,7 @@ import time
 import uuid
 import urllib.error
 import urllib.request
+from collections import deque
 from queue import Queue
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -70,6 +72,10 @@ _catalog_lock = threading.Lock()
 _catalog_cache: dict[str, Any] = {"at": 0.0, "data": None}
 _send_q: dict[str, Queue[str | None]] = {}
 _send_workers: dict[str, threading.Thread] = {}
+_alerts: deque[dict[str, Any]] = deque(maxlen=80)
+_alert_cv = threading.Condition()
+_alert_seq = 0
+_alert_last: dict[str, float] = {}
 
 
 def log(msg: str) -> None:
@@ -95,6 +101,64 @@ def parse_tmux_name(name: str) -> tuple[str, str] | None:
     return parts[0], f"{parts[0]}-{parts[1]}"
 
 
+def resolve_alert_sid(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    parsed = parse_tmux_name(raw)
+    if parsed:
+        return parsed[1]
+    return raw
+
+
+def push_alert(title: str, body: str, sid: str = "") -> dict[str, Any]:
+    global _alert_seq
+    sid = resolve_alert_sid(sid)
+    now = time.time()
+    key = sid or title
+    if key and now - _alert_last.get(key, 0) < 1.2:
+        return {}
+    _alert_last[key] = now
+    sess_title = ""
+    with _lock:
+        sess = SESSIONS.get(sid) if sid else None
+        if sess:
+            sess_title = str(sess.get("title") or "")
+    item = {
+        "sid": sid,
+        "title": (title or sess_title or "wrap")[:80],
+        "body": (body or "")[:160],
+        "ts": now,
+    }
+    with _alert_cv:
+        _alert_seq += 1
+        item["seq"] = _alert_seq
+        _alerts.append(item)
+        _alert_cv.notify_all()
+    return item
+
+
+def install_cmux_shim() -> None:
+    """Point /usr/local/bin/cmux at wrap's shim so wrap tmux skips cmux-bridge."""
+    shim = (ROOT / "bin" / "cmux").resolve()
+    dest = Path("/usr/local/bin/cmux")
+    backup = Path("/usr/local/bin/cmux.agents-host")
+    if not shim.is_file():
+        return
+    try:
+        os.chmod(shim, 0o755)
+        if dest.is_symlink() and dest.resolve() == shim:
+            return
+        if dest.exists() and not backup.exists():
+            dest.replace(backup)
+        elif dest.exists() or dest.is_symlink():
+            dest.unlink()
+        dest.symlink_to(shim)
+        log(f"cmux shim → wrap alerts ({shim})")
+    except OSError as exc:
+        log(f"cmux shim skip: {exc}")
+
+
 def safe_cwd(raw: str) -> Path:
     path = Path(raw).expanduser()
     if not path.is_absolute():
@@ -106,6 +170,157 @@ def safe_cwd(raw: str) -> Path:
     if not resolved.is_dir():
         raise ValueError(f"not a directory: {resolved}")
     return resolved
+
+
+IMAGE_EXTS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+IMAGE_MAGIC = {
+    "image/png": lambda b: b.startswith(b"\x89PNG\r\n\x1a\n"),
+    "image/jpeg": lambda b: b[:3] == b"\xff\xd8\xff",
+    "image/gif": lambda b: b.startswith(b"GIF87a") or b.startswith(b"GIF89a"),
+    "image/webp": lambda b: len(b) >= 12 and b[:4] == b"RIFF" and b[8:12] == b"WEBP",
+}
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_BODY = 12 * 1024 * 1024
+PASTE_MAX_AGE = 24 * 3600
+_paste_sweep_at = 0.0
+
+
+def sniff_image(data: bytes) -> str:
+    for mime, check in IMAGE_MAGIC.items():
+        if check(data):
+            return mime
+    raise ValueError("not a recognized image (png, jpeg, gif, webp)")
+
+
+def paste_dir(cwd: Path) -> Path:
+    d = cwd / ".wrap-pastes"
+    d.mkdir(parents=True, exist_ok=True)
+    gi = d / ".gitignore"
+    if not gi.exists():
+        gi.write_text("*\n")
+    return d
+
+
+def cleanup_paste_dir(d: Path, now: float | None = None) -> int:
+    if not d.is_dir():
+        return 0
+    cutoff = (now if now is not None else time.time()) - PASTE_MAX_AGE
+    n = 0
+    try:
+        names = list(d.iterdir())
+    except OSError:
+        return 0
+    for p in names:
+        if p.name == ".gitignore" or not p.is_file():
+            continue
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+                n += 1
+        except OSError:
+            pass
+    return n
+
+
+def iter_paste_dirs() -> list[Path]:
+    seen: set[str] = set()
+    out: list[Path] = []
+    roots: list[Path] = []
+    if HOST_PROJECTS.is_dir():
+        roots.append(HOST_PROJECTS)
+        try:
+            for p in HOST_PROJECTS.iterdir():
+                if not p.is_dir() or p.name.startswith("."):
+                    continue
+                roots.append(p)
+                try:
+                    roots.extend(
+                        q for q in p.iterdir() if q.is_dir() and not q.name.startswith(".")
+                    )
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    with _lock:
+        for sess in SESSIONS.values():
+            cwd = sess.get("cwd")
+            if cwd:
+                roots.append(Path(str(cwd)))
+    for root in roots:
+        d = root / ".wrap-pastes"
+        try:
+            if not d.is_dir():
+                continue
+            key = str(d.resolve())
+        except OSError:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
+
+
+def sweep_pastes(force: bool = False) -> None:
+    global _paste_sweep_at
+    now = time.time()
+    if not force and now - _paste_sweep_at < 3600:
+        return
+    _paste_sweep_at = now
+    n = 0
+    for d in iter_paste_dirs():
+        n += cleanup_paste_dir(d, now)
+    if n:
+        log(f"wrap-pastes pruned {n} files older than 24h")
+
+
+def _paste_sweeper() -> None:
+    while True:
+        time.sleep(3600)
+        try:
+            sweep_pastes(force=True)
+        except Exception as exc:  # noqa: BLE001
+            log(f"wrap-pastes sweep: {exc}")
+
+
+def save_paste_image(cwd: Path, raw_b64: str) -> dict[str, Any]:
+    blob_s = raw_b64.strip()
+    if blob_s.startswith("data:"):
+        blob_s = blob_s.split(",", 1)[-1]
+    try:
+        data = base64.b64decode(blob_s, validate=False)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("invalid image data") from exc
+    if not data:
+        raise ValueError("empty image")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError("image too large (max 8 MB)")
+    mime = sniff_image(data)
+    dest_dir = paste_dir(cwd)
+    cleanup_paste_dir(dest_dir)
+    dest = dest_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}{IMAGE_EXTS[mime]}"
+    dest.write_bytes(data)
+    sweep_pastes()
+    return {"path": str(dest), "mime": mime, "bytes": len(data)}
+
+
+def safe_paste_file(raw: str) -> Path:
+    p = Path(raw).expanduser().resolve()
+    root = HOST_PROJECTS.resolve()
+    if p != root and root not in p.parents:
+        raise ValueError("path outside HOST_PROJECTS")
+    if ".wrap-pastes" not in p.parts:
+        raise ValueError("not a paste file")
+    if p.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+        raise ValueError("not an image")
+    if not p.is_file():
+        raise ValueError("not found")
+    return p
 
 
 def tmux(*args: str, input_bytes: bytes | None = None, check: bool = False) -> subprocess.CompletedProcess[bytes]:
@@ -187,7 +402,7 @@ def session_meta(sess: dict[str, Any]) -> dict[str, Any]:
         "effort": sess.get("effort") or "",
         "fast": bool(sess.get("fast")),
         "created": sess.get("created") or "",
-        "continue": bool(sess.get("continue")),
+        "cli_session": sess.get("cli_session") or "",
     }
 
 
@@ -235,12 +450,12 @@ def start_tmux(
     agent: str,
     cwd: Path,
     *,
-    continue_session: bool,
     model: str,
     effort: str,
     fast: bool,
     title: str,
     cli_session: str = "",
+    resume_id: str = "",
 ) -> str:
     name = tmux_name(sid)
     if tmux_has(name):
@@ -252,10 +467,10 @@ def start_tmux(
             args.extend(["--model", model])
         if effort:
             args.extend(["--effort", effort])
-        if title:
+        if title and not resume_id:
             args.extend(["--name", title[:40]])
-        if continue_session:
-            args.append("--continue")
+        if resume_id:
+            args.extend(["--resume", resume_id])
         elif cli_session:
             args.extend(["--session-id", cli_session])
         extra_env = {
@@ -270,14 +485,22 @@ def start_tmux(
         args = [binary, "--trust", "--approve-mcps"]
         if model_arg:
             args.extend(["--model", model_arg])
-        if continue_session:
-            args.append("--continue")
+        if resume_id:
+            args.append(f"--resume={resume_id}")
         extra_env = {
             "TERM": "xterm-256color",
             "DISPLAY": os.environ.get("DISPLAY", ":0"),
         }
     else:
         raise ValueError("tmux is only for claude/cursor")
+
+    hook_bin = str(ROOT / "bin")
+    path = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+    if hook_bin not in path.split(":"):
+        path = hook_bin + ":" + path
+    extra_env["PATH"] = path
+    extra_env["WRAP_SESSION_ID"] = sid
+    extra_env["WRAP_URL"] = f"http://127.0.0.1:{PORT}"
 
     env_args: list[str] = []
     for k, v in extra_env.items():
@@ -497,10 +720,10 @@ def pick_transcript(sess: dict[str, Any]) -> Path | None:
             return Path(current)
     if cli_sid:
         for p in tr.list_transcripts(agent, cwd, CLAUDE_HOME, CURSOR_HOME):
-            if cli_sid in p.name and str(p) not in claimed and p.is_file():
-                return p
+            if cli_sid in p.name or cli_sid in p.parent.name:
+                if str(p) not in claimed and p.is_file():
+                    return p
     candidates: list[tuple[float, Path]] = []
-    resume = bool(sess.get("continue"))
     for p in tr.list_transcripts(agent, cwd, CLAUDE_HOME, CURSOR_HOME):
         sp = str(p)
         if sp in claimed:
@@ -511,8 +734,6 @@ def pick_transcript(sess: dict[str, Any]) -> Path | None:
             continue
         prev = seen.get(sp)
         if prev is None:
-            candidates.append((st.st_mtime, p))
-        elif resume and st.st_mtime > float(prev) + 0.05:
             candidates.append((st.st_mtime, p))
     if candidates:
         return max(candidates, key=lambda item: item[0])[1]
@@ -537,7 +758,6 @@ def wait_transcript(
     before: dict[str, float],
     timeout: float = 3.0,
     *,
-    continue_session: bool = False,
     cli_session: str = "",
 ) -> Path | None:
     deadline = time.time() + timeout
@@ -546,7 +766,6 @@ def wait_transcript(
         "cwd": str(cwd),
         "id": "",
         "seen_transcripts": before,
-        "continue": continue_session,
         "cli_session": cli_session,
     }
     while time.time() < deadline:
@@ -835,10 +1054,16 @@ def discover_tmux() -> None:
                 }
             )
             SESSIONS[sid] = existing
+    dropped = False
     with _lock:
         for sid, sess in list(SESSIONS.items()):
-            if sess.get("tmux") and sid not in found and sess.get("agent") != "opencode":
-                sess["tmux"] = None
+            if sess.get("agent") == "opencode":
+                continue
+            if sid not in found:
+                SESSIONS.pop(sid, None)
+                dropped = True
+    if dropped:
+        persist_state()
 
 
 def default_title(agent: str, cwd: Path, model: str, effort: str) -> str:
@@ -853,25 +1078,87 @@ def default_title(agent: str, cwd: Path, model: str, effort: str) -> str:
     return " · ".join(bits)
 
 
+def native_key(sess: dict[str, Any]) -> tuple[str, str]:
+    agent = str(sess.get("agent") or "")
+    if agent == "opencode":
+        return agent, str(sess.get("oc_id") or "")
+    native = str(sess.get("cli_session") or "")
+    if not native:
+        path = str(sess.get("transcript") or "")
+        if path:
+            p = Path(path)
+            native = p.stem if agent == "claude" else p.parent.name
+    return agent, native
+
+
+def find_live_native(agent: str, native_id: str, cwd: Path) -> dict[str, Any] | None:
+    native_id = (native_id or "").strip()
+    if not native_id:
+        return None
+    with _lock:
+        vals = list(SESSIONS.values())
+    for sess in vals:
+        if sess.get("agent") != agent:
+            continue
+        if str(sess.get("cwd") or "") != str(cwd):
+            continue
+        _, got = native_key(sess)
+        if got != native_id:
+            continue
+        if agent == "opencode" and sess.get("oc_id"):
+            return sess
+        if sess.get("tmux") and tmux_has(str(sess["tmux"])):
+            return sess
+    return None
+
+
+def list_history() -> list[dict[str, Any]]:
+    projects = [Path(p["path"]) for p in list_projects()]
+    skip: set[tuple[str, str]] = set()
+    with _lock:
+        vals = list(SESSIONS.values())
+    for sess in vals:
+        live = bool(sess.get("tmux") and tmux_has(str(sess.get("tmux") or ""))) or (
+            sess.get("agent") == "opencode" and bool(sess.get("oc_id"))
+        )
+        if not live:
+            continue
+        key = native_key(sess)
+        if key[1]:
+            skip.add(key)
+    return tr.list_native_history(
+        projects,
+        claude_home=CLAUDE_HOME,
+        cursor_home=CURSOR_HOME,
+        host_projects=HOST_PROJECTS,
+        skip=skip,
+    )
+
+
 def open_session(
     agent: str,
     cwd: Path,
     *,
-    continue_session: bool = False,
     model: str = "",
     effort: str = "",
     fast: bool = False,
     title: str = "",
+    resume_id: str = "",
 ) -> dict[str, Any]:
     if agent not in AGENTS:
         raise ValueError(f"unknown agent: {agent}")
+    resume_id = (resume_id or "").strip()
+    if resume_id:
+        existing = find_live_native(agent, resume_id, cwd)
+        if existing:
+            return existing
     sid = new_session_id(agent)
     user_title = (title or "").strip()
     title = user_title or default_title(agent, cwd, model, effort)
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     if agent == "opencode":
-        oc_id = oc_create(cwd, user_title or cwd.name)
+        oc_id = resume_id or oc_create(cwd, user_title or cwd.name)
         sess = {
             "id": sid,
             "agent": "opencode",
@@ -884,6 +1171,7 @@ def open_session(
             "effort": effort,
             "fast": False,
             "created": created,
+            "cli_session": "",
         }
         with _lock:
             SESSIONS[sid] = sess
@@ -894,24 +1182,23 @@ def open_session(
         raise RuntimeError("tmux is not installed — rebuild the agents image")
 
     before = snapshot_transcripts(agent, cwd)
-    cli_session = "" if continue_session or agent != "claude" else str(uuid.uuid4())
+    cli_session = resume_id if resume_id else (str(uuid.uuid4()) if agent == "claude" else "")
     name = start_tmux(
         sid,
         agent,
         cwd,
-        continue_session=continue_session,
         model=model,
         effort=effort,
         fast=fast,
         title=user_title,
-        cli_session=cli_session,
+        cli_session=cli_session if not resume_id else "",
+        resume_id=resume_id,
     )
     path = wait_transcript(
         agent,
         cwd,
         before,
         timeout=4.0,
-        continue_session=continue_session,
         cli_session=cli_session,
     )
     sess = {
@@ -922,7 +1209,6 @@ def open_session(
         "transcript": str(path) if path else None,
         "seen_transcripts": before,
         "cli_session": cli_session,
-        "continue": continue_session,
         "oc_id": None,
         "title": title,
         "model": model,
@@ -963,13 +1249,17 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
             continue
         if apply_native_title(sess, persist=False, registry=registry):
             changed = True
+        live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or (
+            sess["agent"] == "opencode" and bool(sess.get("oc_id"))
+        )
+        if not live:
+            continue
         pub = {
             **session_meta(sess),
             "busy": False,
-            "live": bool(sess.get("tmux") and tmux_has(sess["tmux"]))
-            or (sess["agent"] == "opencode" and bool(sess.get("oc_id"))),
+            "live": True,
         }
-        if pub["live"] and sess.get("tmux"):
+        if sess.get("tmux"):
             pane = tmux_capture(sess["tmux"])
             pub["busy"] = pane_busy(pane)
         out.append(pub)
@@ -1010,9 +1300,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _read_json(self) -> dict[str, Any]:
+    def _read_json(self, max_n: int = 1_000_000) -> dict[str, Any]:
         n = int(self.headers.get("Content-Length") or "0")
-        if n > 1_000_000:
+        if n > max_n:
             raise ValueError("body too large")
         raw = self.rfile.read(n) if n else b"{}"
         if not raw:
@@ -1048,6 +1338,8 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 st, raw, ct = json_bytes(body)
                 return self._send(st, raw, ct)
+            if path == "/api/alerts":
+                return self._alerts_stream()
             if path == "/api/catalog":
                 st, raw, ct = json_bytes(catalog())
                 return self._send(st, raw, ct)
@@ -1059,8 +1351,28 @@ class Handler(BaseHTTPRequestHandler):
                 if qs.get("cwd"):
                     cwd = safe_cwd(qs["cwd"][0])
                 agent = (qs.get("agent") or [None])[0]
-                st, raw, ct = json_bytes({"sessions": list_sessions(cwd, agent)})
+                st, raw, ct = json_bytes(
+                    {"sessions": list_sessions(cwd, agent), "history": list_history()}
+                )
                 return self._send(st, raw, ct)
+            if path == "/api/file":
+                raw_path = (qs.get("path") or [""])[0]
+                p = safe_paste_file(raw_path)
+                ctype = {
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".gif": "image/gif",
+                    ".webp": "image/webp",
+                }[p.suffix.lower()]
+                body = p.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             m = re.fullmatch(r"/api/sessions/([^/]+)/stream", path)
             if m:
                 return self._stream(m.group(1))
@@ -1077,6 +1389,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b'{"error":"not found"}', "application/json")
         except KeyError:
             self._send(404, b'{"error":"session not found"}', "application/json")
+        except ValueError as exc:
+            st, raw, ct = json_bytes({"error": str(exc)}, 400)
+            self._send(st, raw, ct)
         except Exception as exc:  # noqa: BLE001
             log(f"GET error: {exc}")
             st, raw, ct = json_bytes({"error": str(exc)}, 500)
@@ -1086,7 +1401,21 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         try:
-            data = self._read_json()
+            max_n = MAX_IMAGE_BODY if path == "/api/images" else 1_000_000
+            data = self._read_json(max_n)
+            if path == "/api/images":
+                cwd = safe_cwd(str(data.get("cwd") or ""))
+                saved = save_paste_image(cwd, str(data.get("data") or ""))
+                st, raw, ct = json_bytes(saved, 201)
+                return self._send(st, raw, ct)
+            if path == "/api/internal/notify":
+                item = push_alert(
+                    str(data.get("title") or "wrap"),
+                    str(data.get("body") or ""),
+                    str(data.get("sid") or ""),
+                )
+                st, raw, ct = json_bytes({"ok": True, **item})
+                return self._send(st, raw, ct)
             if path == "/api/sessions":
                 attach = str(data.get("id") or "")
                 if attach:
@@ -1098,11 +1427,11 @@ class Handler(BaseHTTPRequestHandler):
                 sess = open_session(
                     agent,
                     cwd,
-                    continue_session=bool(data.get("continue", False)),
                     model=str(data.get("model") or ""),
                     effort=str(data.get("effort") or ""),
                     fast=bool(data.get("fast")),
                     title=str(data.get("title") or ""),
+                    resume_id=str(data.get("resume") or ""),
                 )
                 st, raw, ct = json_bytes(session_public(sess), 201)
                 return self._send(st, raw, ct)
@@ -1181,6 +1510,32 @@ class Handler(BaseHTTPRequestHandler):
         st, raw, ct = json_bytes({"ok": True, "queued": True})
         self._send(st, raw, ct)
 
+    def _alerts_stream(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        last = 0
+        try:
+            self.wfile.write(b": ping\n\n")
+            self.wfile.flush()
+            while True:
+                with _alert_cv:
+                    _alert_cv.wait(timeout=20)
+                    items = [a for a in _alerts if int(a.get("seq") or 0) > last]
+                if items:
+                    last = int(items[-1]["seq"])
+                    for a in items:
+                        chunk = f"event: alert\ndata: {json.dumps(a, ensure_ascii=False)}\n\n"
+                        self.wfile.write(chunk.encode("utf-8"))
+                else:
+                    self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+            return
+
     def _stream(self, sid: str) -> None:
         sess = get_session(sid)
         self.send_response(200)
@@ -1227,6 +1582,12 @@ def main() -> None:
     STATIC.mkdir(parents=True, exist_ok=True)
     load_state()
     discover_tmux()
+    install_cmux_shim()
+    threading.Thread(target=_paste_sweeper, daemon=True, name="wrap-pastes").start()
+    try:
+        sweep_pastes(force=True)
+    except Exception as exc:  # noqa: BLE001
+        log(f"wrap-pastes sweep: {exc}")
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     log(f"wrap listen {HOST}:{PORT} projects={HOST_PROJECTS}")
     try:

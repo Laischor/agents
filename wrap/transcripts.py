@@ -506,3 +506,132 @@ def latest_opencode_session(db_path: Path, cwd: str) -> dict[str, Any] | None:
         "title": row["title"],
         "time_updated": row["time_updated"],
     }
+
+
+def _oc_time_sec(raw: Any) -> float:
+    try:
+        n = float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if n > 1e12:
+        return n / 1000.0
+    return n
+
+
+def list_opencode_sessions(db_path: Path) -> list[dict[str, Any]]:
+    if not db_path.is_file():
+        return []
+    conn = sqlite3.connect(str(db_path), timeout=2)
+    conn.row_factory = sqlite3.Row
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT id, directory, title, time_updated FROM session "
+                "WHERE time_archived IS NULL"
+            ).fetchall()
+        except sqlite3.Error:
+            rows = conn.execute(
+                "SELECT id, directory, title, time_updated FROM session"
+            ).fetchall()
+    finally:
+        conn.close()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append(
+            {
+                "id": str(row["id"]),
+                "directory": str(row["directory"] or ""),
+                "title": str(row["title"] or "").strip(),
+                "updated": _oc_time_sec(row["time_updated"]),
+            }
+        )
+    return out
+
+
+def list_native_history(
+    projects: list[Path],
+    *,
+    claude_home: Path,
+    cursor_home: Path,
+    host_projects: Path,
+    skip: set[tuple[str, str]] | None = None,
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    """Closed CLI sessions from native stores (no wrap DB)."""
+    skip = skip or set()
+    root = host_projects.resolve()
+    rows: list[tuple[float, dict[str, Any]]] = []
+
+    def add(mtime: float, item: dict[str, Any]) -> None:
+        key = (str(item.get("agent") or ""), str(item.get("native_id") or ""))
+        if not key[1] or key in skip:
+            return
+        rows.append((mtime, item))
+
+    registry = claude_registry_names(claude_home)
+    for cwd in projects:
+        if not cwd.is_dir():
+            continue
+        for agent in ("claude", "cursor"):
+            for path in list_transcripts(agent, cwd, claude_home, cursor_home):
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                if st.st_size < 8:
+                    continue
+                native = path.stem if agent == "claude" else path.parent.name
+                add(
+                    st.st_mtime,
+                    {
+                        "agent": agent,
+                        "cwd": str(cwd),
+                        "native_id": native,
+                        "title": "",
+                        "transcript": str(path),
+                    },
+                )
+
+    for oc in list_opencode_sessions(opencode_db_path()):
+        directory = oc["directory"]
+        if not directory:
+            continue
+        try:
+            d = Path(directory).resolve()
+        except OSError:
+            continue
+        if d != root and root not in d.parents:
+            continue
+        add(
+            oc["updated"],
+            {
+                "agent": "opencode",
+                "cwd": str(d),
+                "native_id": oc["id"],
+                "title": oc["title"],
+                "transcript": None,
+            },
+        )
+
+    rows.sort(key=lambda item: item[0], reverse=True)
+    out: list[dict[str, Any]] = []
+    for mtime, item in rows[:limit]:
+        path = Path(item["transcript"]) if item.get("transcript") else None
+        named = native_session_title(
+            str(item["agent"]),
+            transcript=path,
+            cli_session=str(item["native_id"] or "") if item["agent"] == "claude" else "",
+            oc_id=str(item["native_id"] or "") if item["agent"] == "opencode" else "",
+            claude_home=claude_home,
+            cursor_home=cursor_home,
+            registry=registry,
+        )
+        if named:
+            item["title"] = named
+        elif item.get("title") and is_wrap_default_title(str(item["title"])):
+            item["title"] = ""
+        item["id"] = f"h:{item['agent']}:{item['native_id']}"
+        item["updated"] = mtime
+        item["live"] = False
+        out.append(item)
+    return out

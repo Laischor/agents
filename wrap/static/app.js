@@ -9,8 +9,11 @@ const state = {
   draft: false,
   es: null,
   paneOpen: false,
+  attachments: [],
+  pingSid: "",
   catalog: {},
   sessions: [],
+  history: [],
   projects: [],
   pending: {},
 };
@@ -44,6 +47,32 @@ function renderDiff(text) {
       return `<span class="${cls}">${escapeHtml(line)}</span>`;
     })
     .join("\n");
+}
+
+const PASTE_IMG_RE = /(^|\s)(\/\S+\.wrap-pastes\/\S+\.(?:png|jpe?g|gif|webp))/gi;
+
+function renderMessageBody(text) {
+  const wrap = document.createElement("div");
+  const images = [];
+  const rest = String(text || "")
+    .replace(PASTE_IMG_RE, (_, sp, p) => {
+      images.push(p);
+      return sp;
+    })
+    .trim();
+  for (const p of images) {
+    const img = document.createElement("img");
+    img.className = "msg-img";
+    img.src = "/api/file?path=" + encodeURIComponent(p);
+    img.alt = p.split("/").filter(Boolean).pop() || "image";
+    wrap.appendChild(img);
+  }
+  if (rest) {
+    const body = document.createElement("div");
+    body.innerHTML = renderMarkdown(rest);
+    wrap.appendChild(body);
+  }
+  return wrap;
 }
 
 function projectName(cwd) {
@@ -151,9 +180,10 @@ function applyChrome() {
   const live = Boolean(state.session);
   const draft = state.draft && !live;
   $("session-bar").hidden = !draft;
-  $("resume-wrap").hidden = live;
   $("input").disabled = !canCompose() || state.paneOpen;
-  $("input").placeholder = draft ? "Send a message to start…" : "Message the native CLI…";
+  $("input").placeholder = draft
+    ? "Send a message or paste a screenshot to start…"
+    : "Message the native CLI… paste a screenshot";
   $("btn-send").disabled = !canCompose() || state.paneOpen;
   $("btn-int").hidden = !live;
   $("btn-stop").hidden = !live;
@@ -189,6 +219,7 @@ function openDraft() {
   state.draft = true;
   state.paneOpen = false;
   applyCatalog();
+  clearAttachments();
   $("log").innerHTML = `<div class="empty">Pick a project and agent, then send a message</div>`;
   setStatus("");
   applyChrome();
@@ -204,6 +235,7 @@ function clearMain() {
   state.session = null;
   state.draft = false;
   state.paneOpen = false;
+  clearAttachments();
   applyChrome();
   renderSessions();
 }
@@ -219,10 +251,33 @@ function sessionLabel(s) {
   return proj || t || (s.id || "").slice(-8);
 }
 
+function isActiveRow(s) {
+  if (!state.session) return false;
+  if (s.live) return s.id === state.session.id;
+  const native = state.session.cli_session || state.session.oc_id || "";
+  return Boolean(s.native_id && s.native_id === native && s.agent === state.session.agent);
+}
+
+function sessionRow(s, onClick) {
+  const li = document.createElement("li");
+  if (isActiveRow(s)) li.classList.add("on");
+  if (s.live && s.id && s.id === state.pingSid) li.classList.add("ping");
+  const name = sessionLabel(s);
+  const bits = [agentLabel(s.agent)];
+  const proj = projectName(s.cwd);
+  if (proj && name !== proj) bits.push(proj);
+  li.innerHTML = `<button type="button"><span class="sess-title">${escapeHtml(name)}</span><span class="sess-meta">${
+    s.busy ? '<span class="busy">working</span> · ' : ""
+  }${escapeHtml(bits.filter(Boolean).join(" · "))}</span></button>`;
+  li.querySelector("button").addEventListener("click", onClick);
+  return li;
+}
+
 function renderSessions() {
   const ul = $("sessions");
   ul.innerHTML = "";
   const live = state.sessions.filter((s) => s.live);
+  const closed = state.history || [];
   if (state.draft) {
     const li = document.createElement("li");
     li.className = "draft on";
@@ -237,27 +292,27 @@ function renderSessions() {
     empty.className = "muted";
     empty.textContent = "No active sessions";
     ul.appendChild(empty);
-    return;
   }
   for (const s of live) {
-    const li = document.createElement("li");
-    if (state.session && s.id === state.session.id) li.classList.add("on");
-    const name = sessionLabel(s);
-    const bits = [agentLabel(s.agent)];
-    const proj = projectName(s.cwd);
-    if (proj && name !== proj) bits.push(proj);
-    li.innerHTML = `<button type="button"><span class="sess-title">${escapeHtml(name)}</span><span class="sess-meta">${
-      s.busy ? '<span class="busy">working</span> · ' : ""
-    }${escapeHtml(bits.filter(Boolean).join(" · "))}</span></button>`;
-    li.querySelector("button").addEventListener("click", () => attachSession(s.id));
-    ul.appendChild(li);
+    ul.appendChild(sessionRow(s, () => attachSession(s.id)));
+  }
+  const closedUl = $("closed");
+  const closedHead = $("closed-head");
+  closedUl.innerHTML = "";
+  const showClosed = closed.length > 0;
+  closedHead.hidden = !showClosed;
+  closedUl.hidden = !showClosed;
+  if (!showClosed) return;
+  for (const s of closed) {
+    closedUl.appendChild(sessionRow(s, () => resumeHistory(s)));
   }
 }
 
 async function loadSessions() {
   try {
-    const { sessions } = await api("/api/sessions");
+    const { sessions, history } = await api("/api/sessions");
     state.sessions = sessions || [];
+    state.history = history || [];
     renderSessions();
   } catch (err) {
     $("health").textContent = String(err.message || err);
@@ -359,9 +414,7 @@ function renderMessages(messages) {
       (m.pending ? "queued" : m.role);
     el.appendChild(who);
     if (m.text) {
-      const body = document.createElement("div");
-      body.innerHTML = renderMarkdown(m.text);
-      el.appendChild(body);
+      el.appendChild(renderMessageBody(m.text));
     }
     for (const d of m.diffs || []) {
       const box = document.createElement("div");
@@ -450,13 +503,11 @@ async function startSession() {
       body: JSON.stringify({
         agent: state.agent,
         cwd: state.cwd,
-        continue: $("resume").checked,
         model: $("model").value,
         effort: $("effort").value,
         fast: $("fast").checked,
       }),
     });
-    $("resume").checked = false;
     renderSession(sess);
     connectStream(sess.id);
     loadSessions();
@@ -465,6 +516,31 @@ async function startSession() {
     setStatus(err.message || String(err));
     applyChrome();
     return null;
+  }
+}
+
+async function resumeHistory(item) {
+  if (!item?.native_id || !item.cwd) return;
+  setStatus("");
+  state.agent = item.agent;
+  applyCatalog();
+  try {
+    const sess = await api("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        agent: item.agent,
+        cwd: item.cwd,
+        resume: item.native_id,
+        model: $("model").value,
+        effort: $("effort").value,
+        fast: $("fast").checked,
+      }),
+    });
+    renderSession(sess);
+    connectStream(sess.id);
+    loadSessions();
+  } catch (err) {
+    setStatus(err.message || String(err));
   }
 }
 
@@ -489,13 +565,18 @@ function mergeMessages(serverMsgs) {
 
 async function sendMessage(ev) {
   ev.preventDefault();
-  const text = $("input").value.trim();
+  const typed = $("input").value.trim();
+  const attached = (state.attachments || []).slice();
+  const bits = attached.map((a) => a.path);
+  if (typed) bits.push(typed);
+  const text = bits.join("\n\n");
   if (!text) return;
   if (!state.session) {
     const sess = await startSession();
     if (!sess) return;
   }
   $("input").value = "";
+  clearAttachments();
   const sid = state.session.id;
   if (!state.pending[sid]) state.pending[sid] = [];
   state.pending[sid].push({ id: "p-" + Date.now(), text });
@@ -508,12 +589,14 @@ async function sendMessage(ev) {
     });
   } catch (err) {
     state.pending[sid] = (state.pending[sid] || []).filter((p) => p.text !== text);
-    $("input").value = text;
+    $("input").value = typed;
+    state.attachments = attached;
+    renderAttach();
     setStatus(err.message || String(err));
     renderMessages(mergeMessages(state.session.messages || []));
   } finally {
-    $("btn-send").disabled = !canCompose();
-    $("input").focus();
+    $("btn-send").disabled = !canCompose() || state.paneOpen;
+    if (!state.paneOpen) $("input").focus();
   }
 }
 
@@ -609,6 +692,121 @@ function queueKey(k) {
   if (!keyTimer) keyTimer = setTimeout(flushKeys, 20);
 }
 
+function clearAttachments() {
+  for (const a of state.attachments || []) {
+    if (a.preview) URL.revokeObjectURL(a.preview);
+  }
+  state.attachments = [];
+  const el = $("attach");
+  if (el) {
+    el.innerHTML = "";
+    el.hidden = true;
+  }
+}
+
+function renderAttach() {
+  const el = $("attach");
+  el.innerHTML = "";
+  const list = state.attachments || [];
+  el.hidden = !list.length;
+  for (const a of list) {
+    const chip = document.createElement("div");
+    chip.className = "attach-chip";
+    const img = document.createElement("img");
+    img.src = a.preview || "/api/file?path=" + encodeURIComponent(a.path);
+    img.alt = a.name || "image";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ghost tiny";
+    btn.textContent = "×";
+    btn.addEventListener("click", () => {
+      if (a.preview) URL.revokeObjectURL(a.preview);
+      state.attachments = state.attachments.filter((x) => x !== a);
+      renderAttach();
+    });
+    chip.appendChild(img);
+    chip.appendChild(btn);
+    el.appendChild(chip);
+  }
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ""));
+    r.onerror = () => reject(r.error || new Error("read failed"));
+    r.readAsDataURL(file);
+  });
+}
+
+function clipboardImages(e) {
+  const out = [];
+  const cd = e.clipboardData;
+  if (!cd) return out;
+  for (const item of cd.items || []) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      const f = item.getAsFile();
+      if (f) out.push(f);
+    }
+  }
+  if (!out.length) {
+    for (const f of cd.files || []) {
+      if (f.type.startsWith("image/")) out.push(f);
+    }
+  }
+  return out;
+}
+
+async function ingestImages(files) {
+  const cwd = state.session?.cwd || state.cwd;
+  if (!cwd) {
+    setStatus("Pick a project first");
+    return [];
+  }
+  const saved = [];
+  for (const file of files) {
+    if (file.size > 8 * 1024 * 1024) {
+      setStatus("Image too large (max 8 MB)");
+      continue;
+    }
+    const dataUrl = await fileToDataUrl(file);
+    const data = String(dataUrl).split(",")[1] || "";
+    const out = await api("/api/images", {
+      method: "POST",
+      body: JSON.stringify({ cwd, data, mime: file.type }),
+    });
+    saved.push({
+      path: out.path,
+      mime: out.mime,
+      preview: URL.createObjectURL(file),
+      name: file.name || "image",
+    });
+  }
+  return saved;
+}
+
+async function onImages(files) {
+  if (!files.length) return;
+  try {
+    const saved = await ingestImages(files);
+    if (!saved.length) return;
+    setStatus("");
+    if (state.paneOpen && state.session?.tmux) {
+      const chunk = saved.map((s) => s.path).join(" ") + " ";
+      keys([chunk]);
+      for (const s of saved) {
+        if (s.preview) URL.revokeObjectURL(s.preview);
+      }
+      return;
+    }
+    state.attachments = (state.attachments || []).concat(saved);
+    renderAttach();
+    if (!state.paneOpen) $("input").focus();
+  } catch (err) {
+    setStatus(err.message || String(err));
+  }
+}
+
 function onHash() {
   const id = (location.hash || "#").slice(1);
   if (id === "new") {
@@ -669,21 +867,123 @@ document.addEventListener("keydown", (e) => {
   e.preventDefault();
   queueKey(k);
 });
-$("pane").addEventListener("paste", (e) => {
-  e.preventDefault();
-  const t = e.clipboardData?.getData("text") || "";
-  if (t) keys([t]);
-});
 $("pane").addEventListener("mousedown", () => {
   if (state.paneOpen) $("pane").focus();
 });
+document.addEventListener(
+  "paste",
+  (e) => {
+    const images = clipboardImages(e);
+    if (images.length) {
+      e.preventDefault();
+      onImages(images);
+      return;
+    }
+    if (state.paneOpen && state.session?.tmux) {
+      if (e.target.closest("button, textarea, input, select")) return;
+      const t = e.clipboardData?.getData("text") || "";
+      if (!t) return;
+      e.preventDefault();
+      keys([t]);
+    }
+  },
+  true,
+);
+function bindDrop(el) {
+  el.addEventListener("dragover", (e) => {
+    if ([...e.dataTransfer.items].some((i) => i.type.startsWith("image/"))) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    }
+  });
+  el.addEventListener("drop", (e) => {
+    const files = [...(e.dataTransfer?.files || [])].filter((f) => f.type.startsWith("image/"));
+    if (!files.length) return;
+    e.preventDefault();
+    onImages(files);
+  });
+}
+bindDrop($("chat"));
+bindDrop($("composer"));
+bindDrop($("tui"));
 $("btn-yes").addEventListener("click", () => keys(["y", "Enter"]));
 $("btn-no").addEventListener("click", () => keys(["n", "Enter"]));
 window.addEventListener("hashchange", onHash);
+
+let audioCtx = null;
+function unlockAudio() {
+  const C = window.AudioContext || window.webkitAudioContext;
+  if (!C) return;
+  if (!audioCtx) audioCtx = new C();
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  if (window.Notification && Notification.permission === "default") {
+    Notification.requestPermission().catch(() => {});
+  }
+}
+document.addEventListener("pointerdown", unlockAudio);
+
+function playAlertSound() {
+  unlockAudio();
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  for (const [i, freq] of [880, 1174].entries()) {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.07, now + 0.02 + i * 0.12);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18 + i * 0.12);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(now + i * 0.12);
+    osc.stop(now + 0.22 + i * 0.12);
+  }
+}
+
+function onAlert(a) {
+  playAlertSound();
+  const title = a.title || "wrap";
+  const body = a.body || "";
+  if (window.Notification && Notification.permission === "granted") {
+    try {
+      new Notification(title, { body, tag: a.sid || "wrap" });
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  const prev = document.title;
+  document.title = "● " + title;
+  setTimeout(() => {
+    if (document.title.startsWith("● ")) document.title = prev;
+  }, 4000);
+  if (a.sid) {
+    state.pingSid = a.sid;
+    renderSessions();
+    setTimeout(() => {
+      if (state.pingSid === a.sid) {
+        state.pingSid = "";
+        renderSessions();
+      }
+    }, 2500);
+  }
+}
+
+function connectAlerts() {
+  const es = new EventSource("/api/alerts");
+  es.addEventListener("alert", (ev) => {
+    try {
+      onAlert(JSON.parse(ev.data));
+    } catch (_) {
+      /* ignore */
+    }
+  });
+}
 
 applyChrome();
 Promise.all([loadCatalog(), loadProjects(), loadHealth(), loadSessions()]).then(() => {
   if ((location.hash || "#").slice(1)) onHash();
 });
+connectAlerts();
 setInterval(loadHealth, 15000);
 setInterval(loadSessions, 8000);

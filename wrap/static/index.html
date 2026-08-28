@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>wrap — native sessions</title>
-  <link rel="stylesheet" href="/static/style.css?v=5" />
+  <link rel="stylesheet" href="/static/style.css?v=8" />
 </head>
 <body>
   <aside id="sidebar">
@@ -16,7 +16,11 @@
       </div>
     </header>
     <h2>Sessions <button type="button" id="btn-new" class="ghost tiny">New</button></h2>
-    <ul id="sessions"></ul>
+    <div id="lists">
+      <ul id="sessions"></ul>
+      <h2 id="closed-head" hidden>Closed</h2>
+      <ul id="closed" hidden></ul>
+    </div>
     <footer id="health"></footer>
   </aside>
   <main>
@@ -41,17 +45,13 @@
         <input type="checkbox" id="fast" />
         Fast
       </label>
-      <label class="check" id="resume-wrap">
-        <input type="checkbox" id="resume" />
-        Resume last CLI chat
-      </label>
     </div>
     <div id="chat">
       <section id="log" class="log"></section>
       <div id="tui" hidden>
         <header>
           <strong>TUI</strong>
-          <span>type here — keys go to the CLI</span>
+          <span>type or paste a screenshot — keys go to the CLI</span>
           <button type="button" id="btn-tui-close" class="ghost tiny">Close</button>
         </header>
         <pre id="pane" tabindex="0"></pre>
@@ -59,6 +59,7 @@
     </div>
     <p id="status" hidden></p>
     <form id="composer">
+      <div id="attach" hidden></div>
       <textarea id="input" rows="2" placeholder="Message the native CLI…" disabled></textarea>
       <div class="row">
         <div class="actions">
@@ -72,6 +73,6 @@
       </div>
     </form>
   </main>
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>

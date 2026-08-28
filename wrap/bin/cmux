@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""cmux shim: wrap tmux sessions alert the browser; others use the host bridge.
+
+Installed over /usr/local/bin/cmux while wrap is running. wrap-cmux-shim
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+REAL = os.environ.get("CMUX_REAL", "/usr/local/bin/cmux.agents-host")
+WRAP_URL = os.environ.get("WRAP_URL", "http://127.0.0.1:3780").rstrip("/")
+
+
+def in_wrap() -> bool:
+    if os.environ.get("WRAP_SESSION_ID"):
+        return True
+    tmux = os.environ.get("TMUX") or ""
+    return "wrap.tmux" in tmux
+
+
+def wrap_sid() -> str:
+    sid = (os.environ.get("WRAP_SESSION_ID") or "").strip()
+    if sid:
+        return sid
+    tmux = os.environ.get("TMUX") or ""
+    sock = tmux.split(",", 1)[0] if tmux else ""
+    if not sock:
+        return ""
+    try:
+        r = subprocess.run(
+            ["tmux", "-S", sock, "display-message", "-p", "#S"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    name = (r.stdout or "").strip()
+    if name.startswith("wrap_"):
+        rest = name[len("wrap_") :]
+        parts = rest.split("_", 1)
+        if len(parts) == 2:
+            return f"{parts[0]}-{parts[1]}"
+    return name
+
+
+def parse_notify(argv: list[str]) -> tuple[str, str]:
+    title = "wrap"
+    body = "needs attention"
+    if not argv:
+        return title, body
+    cmd = argv[0]
+    args = argv[1:]
+    if cmd == "notify":
+        i = 0
+        while i < len(args):
+            if args[i] == "--title" and i + 1 < len(args):
+                title = args[i + 1]
+                i += 2
+            elif args[i] == "--body" and i + 1 < len(args):
+                body = args[i + 1]
+                i += 2
+            elif args[i] == "--subtitle":
+                i += 2 if i + 1 < len(args) else 1
+            elif args[i].startswith("-"):
+                i += 1
+            else:
+                body = args[i]
+                i += 1
+        return title, body
+    if cmd in ("claude-hook", "cursor-hook") and args:
+        return cmd.split("-")[0].title(), args[0]
+    if cmd == "hooks" and len(args) >= 2:
+        return args[0], args[1]
+    return title, body
+
+
+def post_alert(title: str, body: str) -> None:
+    payload = {
+        "sid": wrap_sid(),
+        "title": (title or "wrap").replace("\n", " ")[:80],
+        "body": (body or "").replace("\n", " ")[:160],
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{WRAP_URL}/api/internal/notify",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            resp.read()
+    except (urllib.error.URLError, TimeoutError, OSError):
+        pass
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("-h", "--help", "help"):
+        if in_wrap():
+            print("cmux (wrap shim) — alerts go to the wrap browser")
+            return 0
+        if os.path.isfile(REAL) and os.access(REAL, os.X_OK):
+            os.execv(REAL, [REAL, *argv])
+        return 0
+    if in_wrap():
+        if argv and argv[0] in ("notify", "claude-hook", "cursor-hook", "hooks"):
+            title, body = parse_notify(argv)
+            post_alert(title, body)
+        return 0
+    if os.path.isfile(REAL) and os.access(REAL, os.X_OK):
+        os.execv(REAL, [REAL, *argv])
+    print("cmux: host binary missing (cmux.agents-host)", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
