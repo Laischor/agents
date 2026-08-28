@@ -4,7 +4,8 @@ FROM node:24-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/root/.local/bin:${PATH}" \
-    CODEGRAPH_TELEMETRY=0
+    CODEGRAPH_TELEMETRY=0 \
+    IS_SANDBOX=1
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -110,15 +111,7 @@ RUN arch="$(dpkg --print-architecture)" \
   && rm -f /tmp/opencode.tar.gz /tmp/opencode \
   && opencode --version
 
-# T3 Code control surface (web UI via `t3 serve` on :3773).
-# Install under /usr/local (npm -g) — Hermes overlays /root.
-# node:24-bookworm already has python/make/g++ for node-pty.
-RUN npm install -g t3@latest \
-  && node -e "require('/usr/local/lib/node_modules/t3/node_modules/node-pty')" \
-  && mv /usr/local/bin/t3 /usr/local/bin/t3-real \
-  && t3-real --version
-
-RUN apt-get update && apt-get install -y --no-install-recommends python3-pil qrencode \
+RUN apt-get update && apt-get install -y --no-install-recommends tmux \
   && rm -rf /var/lib/apt/lists/*
 
 # Ensure PATH survives login shells (bash -l)
@@ -130,20 +123,15 @@ ENV AGENTS_CLIPBOARD_DIR=/var/agents-clipboard \
     AGENTS_CMUX_DIR=/var/agents-cmux
 COPY clipboard/xclip clipboard/wl-paste /usr/local/bin/
 COPY bin/agents-janitor.sh /usr/local/bin/agents-janitor
-COPY bin/t3-serve.sh /usr/local/bin/t3-serve
-COPY bin/t3-qr.sh /usr/local/bin/t3-qr
-COPY bin/t3-pair.sh /usr/local/bin/t3-pair
-COPY bin/t3-wrapper.sh /usr/local/bin/t3
+COPY bin/wrap-serve.sh /usr/local/bin/wrap-serve
+COPY wrap/ /usr/local/share/wrap/
 # Host GPU bridge shims (Blender/Godot run on macOS via gpu-bridge.sh)
 COPY bin/gpu-job bin/blender bin/godot /usr/local/bin/
 # Host cmux bridge stub (notifications/sounds via cmux-bridge.sh on macOS)
 COPY bin/cmux bin/cmux-agent-hook /usr/local/bin/
 RUN chmod +x /usr/local/bin/xclip /usr/local/bin/wl-paste \
       /usr/local/bin/agents-janitor \
-      /usr/local/bin/t3-serve \
-      /usr/local/bin/t3-qr \
-      /usr/local/bin/t3-pair \
-      /usr/local/bin/t3 \
+      /usr/local/bin/wrap-serve \
       /usr/local/bin/gpu-job /usr/local/bin/blender /usr/local/bin/godot \
       /usr/local/bin/cmux /usr/local/bin/cmux-agent-hook \
   && mkdir -p /var/agents-clipboard /var/agents-gpu /var/agents-cmux /var/log /var/run

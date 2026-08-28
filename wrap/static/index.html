@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>wrap — native sessions</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <aside id="sidebar">
+    <header class="brand">
+      <div class="mark">w</div>
+      <div>
+        <strong>wrap</strong>
+        <span>native sessions</span>
+      </div>
+    </header>
+    <h2>Sessions <button type="button" id="btn-new" class="ghost tiny">New</button></h2>
+    <ul id="sessions"></ul>
+    <footer id="health"></footer>
+  </aside>
+  <main>
+    <header id="top">
+      <div>
+        <h1 id="title">Sessions</h1>
+        <p id="subtitle">New session, then pick a project and agent</p>
+      </div>
+      <div class="actions">
+        <button type="button" id="btn-start" class="primary" hidden>Start</button>
+        <button type="button" id="btn-pane" class="ghost" hidden>TUI</button>
+        <button type="button" id="btn-yes" class="ghost" hidden>Yes</button>
+        <button type="button" id="btn-no" class="ghost" hidden>No</button>
+        <button type="button" id="btn-stop" class="ghost danger" hidden>Stop</button>
+      </div>
+    </header>
+    <div id="session-bar" hidden>
+      <label>Project
+        <select id="project"></select>
+      </label>
+      <label>Agent
+        <select id="agent">
+          <option value="claude">Claude</option>
+          <option value="cursor">Cursor</option>
+          <option value="opencode">OpenCode</option>
+        </select>
+      </label>
+      <label>Model
+        <select id="model"></select>
+      </label>
+      <label>Effort
+        <select id="effort"></select>
+      </label>
+      <label class="check" id="fast-wrap" hidden>
+        <input type="checkbox" id="fast" />
+        Fast
+      </label>
+      <label class="check" id="resume-wrap">
+        <input type="checkbox" id="resume" />
+        Resume last CLI chat
+      </label>
+    </div>
+    <section id="log" class="log"></section>
+    <pre id="pane" hidden></pre>
+    <form id="composer">
+      <textarea id="input" rows="2" placeholder="Message the native CLI…" disabled></textarea>
+      <div class="row">
+        <button type="button" id="btn-int" class="ghost" disabled>Interrupt</button>
+        <button type="submit" id="btn-send" disabled>Send</button>
+      </div>
+    </form>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

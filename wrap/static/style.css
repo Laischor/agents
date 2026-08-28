@@ -1,0 +1,207 @@
+:root {
+  --bg: #12130f;
+  --bg-2: #1b1c16;
+  --bg-3: #24251c;
+  --ink: #ece7d5;
+  --muted: #9a947f;
+  --line: #34362b;
+  --accent: #c4a35a;
+  --accent-2: #6f8f62;
+  --danger: #c45c4a;
+  --user: #24251c;
+  --assistant: #181910;
+  --radius: 12px;
+  --font: "Iowan Old Style", "Palatino Linotype", Palatino, "Times New Roman", serif;
+  --mono: "IBM Plex Mono", "ui-monospace", Menlo, monospace;
+  --sans: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+}
+
+#sidebar {
+  width: 280px;
+  flex: 0 0 280px;
+  background: var(--bg-2);
+  border-right: 1px solid var(--line);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+}
+.brand { display: flex; gap: 10px; align-items: center; }
+.brand .mark {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: var(--accent); color: #1a160c;
+  display: grid; place-items: center;
+  font-family: var(--font); font-weight: 700; font-size: 18px;
+}
+.brand strong { display: block; font-family: var(--font); font-size: 20px; }
+.brand span, #subtitle, #health, h2 {
+  color: var(--muted); font-size: 12px;
+}
+h2 {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin: 8px 0 0; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+}
+.ghost.tiny { padding: 2px 8px; font-size: 11px; }
+
+#sessions {
+  list-style: none; margin: 0; padding: 0;
+  flex: 1 1 auto; overflow: auto; min-height: 80px;
+}
+#sessions li button, #sessions .muted {
+  width: 100%; text-align: left; background: transparent; border: 0;
+  color: var(--ink); padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  font: inherit; font-size: 13px;
+}
+#sessions li button {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+}
+#sessions li button:hover, #sessions li.on button { background: var(--bg-3); }
+#sessions .muted { color: var(--muted); cursor: default; font-size: 12px; }
+#sessions .sess-title {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+#sessions .sess-meta { color: var(--muted); font-size: 11px; }
+#sessions .sess-meta .busy { color: var(--accent-2); }
+#sessions li.draft button { border: 1px dashed var(--line); }
+
+#health { margin-top: auto; }
+
+main {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column;
+}
+#top {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  padding: 18px 24px 12px; gap: 12px;
+}
+#title { margin: 0; font-family: var(--font); font-size: 26px; font-weight: 600; }
+#subtitle { margin: 4px 0 0; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+#session-bar {
+  display: flex; flex-wrap: wrap; gap: 10px 14px;
+  align-items: flex-end;
+  padding: 0 24px 14px;
+  border-bottom: 1px solid var(--line);
+}
+#session-bar label {
+  display: flex; flex-direction: column; gap: 4px;
+  color: var(--muted); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+}
+#session-bar select {
+  background: var(--bg-3); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 10px; font: inherit; font-size: 13px; min-width: 140px;
+}
+#session-bar select:disabled { opacity: 0.7; cursor: default; }
+#session-bar .check {
+  flex-direction: row; align-items: center; gap: 8px;
+  text-transform: none; letter-spacing: 0; font-size: 12px;
+  padding-bottom: 6px;
+}
+
+.ghost, #btn-send, #btn-int, .primary {
+  font: inherit; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg-3); color: var(--ink);
+  border-radius: 8px; padding: 8px 12px;
+}
+.ghost.danger { color: var(--danger); }
+.primary, #btn-send {
+  background: var(--accent); color: #1a160c; border-color: var(--accent); font-weight: 600;
+}
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.log {
+  flex: 1; overflow: auto; padding: 20px 24px 12px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.msg {
+  max-width: 780px; padding: 12px 14px; border-radius: var(--radius);
+  line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+}
+.msg.user { background: var(--user); align-self: flex-end; }
+.msg.pending { opacity: 0.55; }
+.msg.assistant { background: var(--assistant); border: 1px solid var(--line); }
+.msg .who { font-size: 11px; color: var(--muted); margin-bottom: 6px; letter-spacing: 0.04em; }
+.msg .tools { font-family: var(--mono); font-size: 11px; color: var(--accent); margin-top: 8px; }
+.msg .diff {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0e0f0b;
+}
+.msg .diff-head {
+  padding: 6px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg .diff pre {
+  margin: 0;
+  max-height: 360px;
+  padding: 8px 10px;
+  white-space: pre;
+  line-height: 1.45;
+  font-size: 12px;
+}
+.msg .diff-add { color: #8fb88a; }
+.msg .diff-del { color: #c45c4a; }
+.msg .diff-hunk { color: var(--accent); }
+.msg .diff-file { color: var(--muted); }
+.msg .diff-ctx { color: #c9cbb8; }
+.msg pre, .msg code {
+  font-family: var(--mono); font-size: 13px;
+}
+.msg pre {
+  background: #0e0f0b; padding: 10px; border-radius: 8px; overflow: auto;
+}
+.empty { color: var(--muted); margin: auto; font-family: var(--font); font-size: 20px; }
+.busy-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--accent-2);
+  display: inline-block; margin-right: 6px; animation: pulse 1s infinite;
+}
+@keyframes pulse { 50% { opacity: 0.3; } }
+
+#pane {
+  margin: 0 24px 8px; max-height: 180px; overflow: auto;
+  background: #0e0f0b; color: #c9cbb8; font-family: var(--mono); font-size: 11px;
+  padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+}
+
+#composer {
+  padding: 12px 24px 20px; border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 8px;
+}
+#input {
+  width: 100%; resize: vertical; min-height: 52px;
+  background: var(--bg-2); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 12px; font: inherit;
+}
+.row { display: flex; justify-content: flex-end; gap: 8px; }
+
+@media (max-width: 800px) {
+  body { flex-direction: column; }
+  #sidebar { width: 100%; flex: none; max-height: 36vh; }
+  #title { font-size: 20px; }
+  #session-bar select { min-width: 0; flex: 1; }
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch an agent CLI inside the agents container.
-# Usage: run.sh <agent|pi|claude|opencode|t3|hermes|hermes-setup|cursor-agent|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]
+# Usage: run.sh <agent|pi|claude|opencode|wrap|hermes|hermes-setup|cursor-agent|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]
 
 set -euo pipefail
 
@@ -81,8 +81,7 @@ ensure_services() {
     "$AGENTS_DIR/data/gpu/logs" \
     "$AGENTS_DIR/data/cmux/jobs" "$AGENTS_DIR/data/cmux/running" \
     "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs" \
-    "$AGENTS_DIR/data/cmux/sessions" \
-    "$AGENTS_DIR/data/t3"
+    "$AGENTS_DIR/data/cmux/sessions"
   local compose_args=()
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes" "$AGENTS_DIR/data/open-webui"
@@ -167,15 +166,15 @@ CMUX_DOCKER_ENV=(
 
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
-  echo "usage: $(basename "$0") <agent|pi|claude|opencode|t3|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]" >&2
+  echo "usage: $(basename "$0") <agent|pi|claude|opencode|wrap|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]" >&2
   exit 1
 fi
 shift
 
 case "$cmd" in
-  agent|cursor-agent|pi|claude|opencode|t3|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash) ;;
+  agent|cursor-agent|pi|claude|opencode|wrap|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash) ;;
   *)
-    echo "unknown command: $cmd (expected agent, pi, claude, opencode, t3, hermes, hermes-setup, codegraph, clipboard-bridge, gpu-bridge, cmux-bridge, or bash)" >&2
+    echo "unknown command: $cmd (expected agent, pi, claude, opencode, wrap, hermes, hermes-setup, codegraph, clipboard-bridge, gpu-bridge, cmux-bridge, or bash)" >&2
     exit 1
     ;;
 esac
@@ -254,49 +253,19 @@ case "$cmd" in
       "${CMUX_DOCKER_ENV[@]}" \
       "$SERVICE" "$cmd" "$@"
     ;;
-  t3)
-    # Pairing tokens are minted on demand. t3 prints the container IP
-    # (172.x); rewrite to the host publish URL so the token is usable.
-    if [[ "${1:-}" == "pair" ]]; then
-      shift
-      t3_public="${T3CODE_PUBLIC_URL:-http://127.0.0.1:3773}"
-      # Image helper after rebuild; bind-mounted script works immediately.
-      t3_pair_bin=t3-pair
-      if ! "${COMPOSE[@]}" exec -T "$SERVICE" sh -c 'command -v t3-pair >/dev/null' 2>/dev/null; then
-        t3_pair_bin="bash $AGENTS_DIR/bin/t3-pair.sh"
-      fi
-      # shellcheck disable=SC2086
-      exec "${COMPOSE[@]}" exec -T \
-        -e "T3CODE_PUBLIC_URL=$t3_public" \
-        "$SERVICE" $t3_pair_bin "$@"
-    fi
-    # Default `t3 serve` binds 0.0.0.0:3773 so the compose publish reaches it.
-    # If the entrypoint already started the UI, just print the URL.
+  wrap)
+    wrap_public="${WRAP_PUBLIC_URL:-http://127.0.0.1:3780}"
     if [[ $# -eq 0 || "${1:-}" == "serve" ]]; then
-      if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:3773/" 2>/dev/null; then
-        printf 'T3 Code web UI already running: http://127.0.0.1:3773\n'
-        printf 'Pairing / projects: dt3 pair | dt3 project add PATH\n'
+      if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:3780/" 2>/dev/null; then
+        printf 'Wrap (native sessions) already running: %s\n' "$wrap_public"
         exit 0
       fi
       if [[ "${1:-}" == "serve" ]]; then
         shift
       fi
-      t3_has_host=0
-      t3_has_port=0
-      for t3_a in "$@"; do
-        case "$t3_a" in
-          --host|--host=*) t3_has_host=1 ;;
-          --port|--port=*) t3_has_port=1 ;;
-        esac
-      done
-      t3_args=(serve)
-      [[ "$t3_has_host" -eq 1 ]] || t3_args+=(--host 0.0.0.0)
-      [[ "$t3_has_port" -eq 1 ]] || t3_args+=(--port 3773)
-      t3_args+=("$@")
-      exec "${COMPOSE[@]}" exec -it -w "$workdir" \
-        "$SERVICE" t3 "${t3_args[@]}"
+      exec "${COMPOSE[@]}" exec -it -w "$workdir" "$SERVICE" wrap-serve "$@"
     fi
-    exec "${COMPOSE[@]}" exec -it -w "$workdir" "$SERVICE" t3 "$@"
+    exec "${COMPOSE[@]}" exec -it -w "$workdir" "$SERVICE" wrap-serve "$@"
     ;;
 esac
 

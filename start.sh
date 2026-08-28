@@ -119,29 +119,26 @@ compose_profile_args() {
   fi
 }
 
-t3_serve_enabled() {
-  case "${AGENTS_T3_SERVE:-1}" in
+wrap_serve_enabled() {
+  case "${AGENTS_WRAP_SERVE:-1}" in
     0|false|FALSE|no|NO|off|OFF) return 1 ;;
     *) return 0 ;;
   esac
 }
 
-# Mint a pairing token after deploy. QR is rebuilt for T3CODE_PUBLIC_URL
-# (t3 itself encodes the Docker 172.x address).
-print_t3_pairing() {
-  t3_serve_enabled || return 0
-  local public="${T3CODE_PUBLIC_URL:-http://127.0.0.1:3773}"
-  log "T3 Code Web-UI: $public"
+print_wrap_url() {
+  wrap_serve_enabled || return 0
+  local public="${WRAP_PUBLIC_URL:-http://127.0.0.1:3780}"
+  log "Wrap (native Claude/Cursor/OpenCode): $public"
   local i
-  for i in {1..45}; do
-    if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:3773/" 2>/dev/null; then
-      log "T3 Pairing — Token in die Web-UI einfügen (oder dt3 pair):"
-      "$AGENTS_DIR/run.sh" t3 pair || log "T3 pair fehlgeschlagen — später: dt3 pair"
+  for i in {1..30}; do
+    if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:3780/" 2>/dev/null; then
+      log "Wrap bereit"
       return 0
     fi
     sleep 1
   done
-  log "T3 noch nicht erreichbar. Später: dt3 pair"
+  log "Wrap noch nicht erreichbar. Später: agents wrap"
 }
 
 # shellcheck source=bin/ensure-gh-passthrough.sh
@@ -157,7 +154,6 @@ ensure_data_dirs() {
     "$AGENTS_DIR/data/claude" \
     "$AGENTS_DIR/data/opencode" \
     "$AGENTS_DIR/data/opencode-config" \
-    "$AGENTS_DIR/data/t3" \
     "$AGENTS_DIR/data/clipboard" \
     "$AGENTS_DIR/data/gpu/jobs" \
     "$AGENTS_DIR/data/gpu/running" \
@@ -342,8 +338,8 @@ start_agents() {
   compose_profile_args
   "${COMPOSE[@]}" "${COMPOSE_PROFILES[@]}" up -d --build
 
-  log "Fertig. Beispiele: dagent | dpi | dclaude | dopencode | dt3 | agents-shell"
-  print_t3_pairing
+  log "Fertig. Beispiele: dagent | dpi | dclaude | dopencode | dwrap | agents-shell"
+  print_wrap_url
   log "Screenshot-Paste: Bridge startet mit dagent/dclaude/dopencode (Ctrl+V, nicht Cmd+V)"
   if hermes_enabled; then
     log "Open WebUI (Chat → Hermes): http://127.0.0.1:3000"

@@ -54,7 +54,7 @@ services:
       TERMINAL_CONTAINER_PERSISTENT: "true"
       TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","GH_TOKEN","GITHUB_TOKEN","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","CODEGRAPH_TELEMETRY","AGENTS_CLIPBOARD_DIR","AGENTS_GPU_DIR","AGENTS_CMUX_DIR","HOST_PROJECTS","CMUX_WORKSPACE_ID","CMUX_SURFACE_ID","CMUX_TAB_ID","CMUX_WINDOW_ID","SEARXNG_URL","FIRECRAWL_API_URL"]'
       # DISPLAY=:0 → Cursor CLI will call xclip stubs (no real X11 needed)
-      TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard","AGENTS_GPU_DIR":"/var/agents-gpu","AGENTS_CMUX_DIR":"/var/agents-cmux","DISPLAY":":0"}'
+      TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CODEGRAPH_TELEMETRY":"0","CAVEMAN_DEFAULT_MODE":"ultra","IS_SANDBOX":"1","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard","AGENTS_GPU_DIR":"/var/agents-gpu","AGENTS_CMUX_DIR":"/var/agents-cmux","DISPLAY":":0"}'
       # Host-absolute bind mounts (compose interpolates before the container sees them)
       TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/opencode:/root/.local/share/opencode","${AGENTS_DIR}/data/opencode-config:/root/.config/opencode","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${AGENTS_DIR}/data/gpu:/var/agents-gpu","${AGENTS_DIR}/data/cmux:/var/agents-cmux","${AGENTS_DIR}/data/gitconfig:/root/.gitconfig:ro","${AGENTS_DIR}/data/gh:/root/.config/gh:ro","${HOME}/.ssh:/root/.ssh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
     volumes:
@@ -154,7 +154,7 @@ services:
     # Override via AGENTS_MEM_LIMIT in .env (e.g. 4g, 6g)
     mem_limit: ${AGENTS_MEM_LIMIT:-3g}
     ports:
-      - "127.0.0.1:3773:3773"   # T3 Code web UI (binds 0.0.0.0:3773 in-container)
+      - "127.0.0.1:3780:3780"   # wrap — native CLI sessions (tmux / OpenCode API)
     environment:
       # Cursor CLI
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}
@@ -166,6 +166,9 @@ services:
       GH_TOKEN: ${GH_TOKEN:-}
       # Keep Claude auth/config under one mounted dir (survives rebuild)
       CLAUDE_CONFIG_DIR: /root/.claude
+      # Container is root; Claude Code refuses --dangerously-skip-permissions
+      # unless it knows it is already sandboxed.
+      IS_SANDBOX: "1"
       CODEGRAPH_TELEMETRY: "0"
       # Claude caveman SessionStart default (lite|full|ultra|…)
       CAVEMAN_DEFAULT_MODE: ultra
@@ -177,15 +180,14 @@ services:
       AGENTS_CMUX_DIR: /var/agents-cmux
       # Dummy display so Cursor CLI enables linux clipboard image paste (xclip stubs)
       DISPLAY: ":0"
-      # T3 Code headless web UI (entrypoint starts `t3 serve` when 1)
-      AGENTS_T3_SERVE: ${AGENTS_T3_SERVE:-1}
-      T3CODE_HOST: "0.0.0.0"
-      T3CODE_PORT: "3773"
-      T3CODE_HOME: /root/.t3
-      T3CODE_NO_BROWSER: "true"
-      T3CODE_MODE: web
-      T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "false"
-      T3CODE_PUBLIC_URL: ${T3CODE_PUBLIC_URL:-http://127.0.0.1:3773}
+      HOST_PROJECTS: ${HOST_PROJECTS}
+      # wrap: native Claude/Cursor tmux + OpenCode HTTP (no extra harness)
+      AGENTS_WRAP_SERVE: ${AGENTS_WRAP_SERVE:-1}
+      WRAP_HOST: "0.0.0.0"
+      WRAP_PORT: "3780"
+      WRAP_PUBLIC_URL: ${WRAP_PUBLIC_URL:-http://127.0.0.1:3780}
+      # Own OpenCode HTTP port — leave the default :4096 free
+      WRAP_OPENCODE_PORT: "4097"
       # Self-hosted Firecrawl (profile firecrawl / FIRECRAWL=1)
       FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-http://firecrawl:3002}
     volumes:
@@ -206,8 +208,9 @@ services:
       # OpenCode auth/sessions + global config (survive rebuild)
       - ./data/opencode:/root/.local/share/opencode
       - ./data/opencode-config:/root/.config/opencode
-      # T3 Code server state (pairing, projects, threads)
-      - ./data/t3:/root/.t3
+      # Live wrap sources (no image rebuild for UI/server tweaks)
+      - ./wrap:/usr/local/share/wrap:ro
+      - ./bin/wrap-serve.sh:/usr/local/bin/wrap-serve:ro
       # macOS clipboard bridge drop dir (PNG for Claude/Cursor/OpenCode Ctrl+V paste)
       - ./data/clipboard:/var/agents-clipboard
       # macOS GPU job queue (Blender/Godot via gpu-bridge.sh)
