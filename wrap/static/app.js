@@ -140,41 +140,42 @@ function canCompose() {
   return state.draft && Boolean(state.cwd) && Boolean(state.agent);
 }
 
+function setStatus(msg) {
+  const el = $("status");
+  const text = msg ? String(msg) : "";
+  el.hidden = !text;
+  el.textContent = text;
+}
+
 function applyChrome() {
   const live = Boolean(state.session);
   const draft = state.draft && !live;
-  $("session-bar").hidden = !(live || draft);
-  $("project").disabled = live;
-  $("agent").disabled = live;
-  $("model").disabled = live;
-  $("effort").disabled = live;
-  $("fast").disabled = live;
+  $("session-bar").hidden = !draft;
   $("resume-wrap").hidden = live;
-  $("btn-start").hidden = !draft;
-  $("btn-start").disabled = !(draft && state.cwd);
-  $("input").disabled = !canCompose();
-  $("btn-send").disabled = !canCompose();
-  $("btn-int").disabled = !live;
+  $("input").disabled = !canCompose() || state.paneOpen;
+  $("input").placeholder = draft ? "Send a message to start…" : "Message the native CLI…";
+  $("btn-send").disabled = !canCompose() || state.paneOpen;
+  $("btn-int").hidden = !live;
   $("btn-stop").hidden = !live;
   $("btn-pane").hidden = !(live && state.session?.tmux);
+  $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && live));
   $("btn-yes").hidden = !(live && state.session?.tmux);
   $("btn-no").hidden = !(live && state.session?.tmux);
+  if (live && state.session?.tmux && state.paneOpen) {
+    $("tui").hidden = false;
+  } else {
+    $("tui").hidden = true;
+  }
   if (live) {
     $("agent").value = state.session.agent || state.agent;
     if (state.session.cwd) $("project").value = state.session.cwd;
   } else if (draft) {
     $("agent").value = state.agent;
     $("project").value = state.cwd || "";
-    $("title").textContent = "New session";
-    const proj = projectName(state.cwd);
-    $("subtitle").textContent = proj
-      ? `${agentLabel(state.agent)} · ${proj} — Start or send a message`
-      : "Pick a project and agent";
   } else {
-    $("title").textContent = "Sessions";
-    $("subtitle").textContent = "New session, then pick a project and agent";
     $("log").innerHTML = `<div class="empty">New session — then choose project and agent</div>`;
-    $("pane").hidden = true;
+    state.paneOpen = false;
+    $("tui").hidden = true;
   }
   setHash();
 }
@@ -188,7 +189,8 @@ function openDraft() {
   state.draft = true;
   state.paneOpen = false;
   applyCatalog();
-  $("log").innerHTML = `<div class="empty">Pick a project and agent, then Start</div>`;
+  $("log").innerHTML = `<div class="empty">Pick a project and agent, then send a message</div>`;
+  setStatus("");
   applyChrome();
   renderSessions();
   $("project").focus();
@@ -268,7 +270,7 @@ async function loadProjects() {
     state.projects = projects || [];
     fillProjects();
   } catch (err) {
-    $("subtitle").textContent = String(err.message || err);
+    setStatus(err.message || err);
   }
 }
 
@@ -319,20 +321,16 @@ function renderSession(sess) {
   state.cwd = sess.cwd || state.cwd;
   fillProjects();
   applyCatalog();
-  const name = sessionLabel(sess);
-  $("title").textContent = name;
-  const bits = [agentLabel(sess.agent), projectName(sess.cwd)];
-  if (sess.model) bits.push(sess.model);
-  if (sess.effort) bits.push(sess.effort);
-  if (sess.fast) bits.push("fast");
-  bits.push(sess.busy ? "working" : "idle");
-  $("subtitle").textContent = bits.filter(Boolean).join(" · ");
+  setStatus("");
   renderMessages(mergeMessages(sess.messages || []));
   if (sess.tmux) {
-    $("pane").hidden = !state.paneOpen;
     $("pane").textContent = sess.pane || "";
+    if (state.paneOpen) {
+      $("tui").hidden = false;
+      $("pane").scrollTop = $("pane").scrollHeight;
+    }
   } else {
-    $("pane").hidden = true;
+    setPaneOpen(false);
   }
   applyChrome();
   renderSessions();
@@ -410,12 +408,9 @@ function connectStream(id) {
       if (state.session) {
         state.session.busy = data.busy;
         state.session.pane = data.pane;
-        const bits = [agentLabel(state.session.agent), projectName(state.session.cwd)];
-        if (state.session.model) bits.push(state.session.model);
-        bits.push(data.busy ? "working" : "idle");
-        $("subtitle").textContent = bits.filter(Boolean).join(" · ");
       }
       $("pane").textContent = data.pane || "";
+      if (state.paneOpen) $("pane").scrollTop = $("pane").scrollHeight;
       renderSessions();
     } catch (_) {
       /* ignore */
@@ -423,12 +418,11 @@ function connectStream(id) {
   });
   es.addEventListener("gone", () => {
     es.close();
-    $("subtitle").textContent = "session ended";
+    setStatus("session ended");
   });
 }
 
 async function attachSession(id) {
-  $("title").textContent = "Opening…";
   try {
     const sess = await api("/api/sessions", {
       method: "POST",
@@ -438,19 +432,18 @@ async function attachSession(id) {
     connectStream(sess.id);
     loadSessions();
   } catch (err) {
-    $("subtitle").textContent = err.message || String(err);
+    setStatus(err.message || String(err));
   }
 }
 
 async function startSession() {
   if (!state.cwd) {
-    $("subtitle").textContent = "Pick a project first";
+    setStatus("Pick a project first");
     return null;
   }
   savePrefs();
-  $("title").textContent = "Starting…";
-  $("subtitle").textContent = `${agentLabel(state.agent)} in ${projectName(state.cwd)}`;
-  $("btn-start").disabled = true;
+  setStatus("");
+  $("btn-send").disabled = true;
   try {
     const sess = await api("/api/sessions", {
       method: "POST",
@@ -469,11 +462,9 @@ async function startSession() {
     loadSessions();
     return sess;
   } catch (err) {
-    $("subtitle").textContent = err.message || String(err);
+    setStatus(err.message || String(err));
     applyChrome();
     return null;
-  } finally {
-    $("btn-start").disabled = false;
   }
 }
 
@@ -518,7 +509,7 @@ async function sendMessage(ev) {
   } catch (err) {
     state.pending[sid] = (state.pending[sid] || []).filter((p) => p.text !== text);
     $("input").value = text;
-    $("subtitle").textContent = err.message || String(err);
+    setStatus(err.message || String(err));
     renderMessages(mergeMessages(state.session.messages || []));
   } finally {
     $("btn-send").disabled = !canCompose();
@@ -527,15 +518,95 @@ async function sendMessage(ev) {
 }
 
 async function keys(list) {
-  if (!state.session) return;
+  if (!state.session || !list.length) return;
   try {
     await api(`/api/sessions/${state.session.id}/keys`, {
       method: "POST",
       body: JSON.stringify({ keys: list }),
     });
   } catch (err) {
-    $("subtitle").textContent = err.message || String(err);
+    setStatus(err.message || String(err));
   }
+}
+
+function setPaneOpen(on) {
+  state.paneOpen = Boolean(on) && Boolean(state.session?.tmux);
+  $("tui").hidden = !state.paneOpen;
+  $("btn-pane").classList.toggle("on", state.paneOpen);
+  $("input").disabled = !canCompose() || state.paneOpen;
+  $("btn-send").disabled = !canCompose() || state.paneOpen;
+  if (state.paneOpen) {
+    $("pane").focus();
+    $("pane").scrollTop = $("pane").scrollHeight;
+  }
+}
+
+function mapTuiKey(e) {
+  if (e.metaKey || e.altKey) return null;
+  if (e.ctrlKey) {
+    const map = {
+      c: "C-c",
+      d: "C-d",
+      u: "C-u",
+      a: "C-a",
+      e: "C-e",
+      k: "C-k",
+      w: "C-w",
+      l: "C-l",
+      n: "C-n",
+      p: "C-p",
+    };
+    return map[e.key.toLowerCase()] || null;
+  }
+  switch (e.key) {
+    case "Enter":
+      return "Enter";
+    case "Escape":
+      return "Escape";
+    case "Backspace":
+      return "BSpace";
+    case "Tab":
+      return "Tab";
+    case "ArrowUp":
+      return "Up";
+    case "ArrowDown":
+      return "Down";
+    case "ArrowLeft":
+      return "Left";
+    case "ArrowRight":
+      return "Right";
+    case "Home":
+      return "Home";
+    case "End":
+      return "End";
+    case "PageUp":
+      return "PPage";
+    case "PageDown":
+      return "NPage";
+    case "Delete":
+      return "DC";
+    case " ":
+      return "Space";
+    default:
+      if (e.key.length === 1) return e.key;
+      return null;
+  }
+}
+
+let keyQueue = [];
+let keyTimer = 0;
+
+function flushKeys() {
+  keyTimer = 0;
+  if (!keyQueue.length) return;
+  const batch = keyQueue;
+  keyQueue = [];
+  keys(batch);
+}
+
+function queueKey(k) {
+  keyQueue.push(k);
+  if (!keyTimer) keyTimer = setTimeout(flushKeys, 20);
 }
 
 function onHash() {
@@ -557,7 +628,6 @@ $("model").addEventListener("change", savePrefs);
 $("effort").addEventListener("change", savePrefs);
 $("fast").addEventListener("change", savePrefs);
 $("btn-new").addEventListener("click", openDraft);
-$("btn-start").addEventListener("click", () => startSession());
 $("composer").addEventListener("submit", sendMessage);
 $("input").addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && !ev.shiftKey) {
@@ -570,7 +640,7 @@ $("btn-int").addEventListener("click", async () => {
   try {
     await api(`/api/sessions/${state.session.id}/interrupt`, { method: "POST", body: "{}" });
   } catch (err) {
-    $("subtitle").textContent = err.message || String(err);
+    setStatus(err.message || String(err));
   }
 });
 $("btn-stop").addEventListener("click", async () => {
@@ -581,12 +651,31 @@ $("btn-stop").addEventListener("click", async () => {
     clearMain();
     loadSessions();
   } catch (err) {
-    $("subtitle").textContent = err.message || String(err);
+    setStatus(err.message || String(err));
   }
 });
-$("btn-pane").addEventListener("click", () => {
-  state.paneOpen = !state.paneOpen;
-  $("pane").hidden = !state.paneOpen;
+$("btn-pane").addEventListener("click", () => setPaneOpen(!state.paneOpen));
+$("btn-tui-close").addEventListener("click", () => setPaneOpen(false));
+$("tui").addEventListener("click", (e) => {
+  if (e.target.closest("button")) return;
+  if (state.paneOpen) $("pane").focus();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
+  if (!state.paneOpen || !state.session?.tmux) return;
+  if (e.target.closest("button, textarea, input, select")) return;
+  const k = mapTuiKey(e);
+  if (!k) return;
+  e.preventDefault();
+  queueKey(k);
+});
+$("pane").addEventListener("paste", (e) => {
+  e.preventDefault();
+  const t = e.clipboardData?.getData("text") || "";
+  if (t) keys([t]);
+});
+$("pane").addEventListener("mousedown", () => {
+  if (state.paneOpen) $("pane").focus();
 });
 $("btn-yes").addEventListener("click", () => keys(["y", "Enter"]));
 $("btn-no").addEventListener("click", () => keys(["n", "Enter"]));

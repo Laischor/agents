@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>wrap — native sessions</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=5" />
 </head>
 <body>
   <aside id="sidebar">
@@ -20,19 +20,6 @@
     <footer id="health"></footer>
   </aside>
   <main>
-    <header id="top">
-      <div>
-        <h1 id="title">Sessions</h1>
-        <p id="subtitle">New session, then pick a project and agent</p>
-      </div>
-      <div class="actions">
-        <button type="button" id="btn-start" class="primary" hidden>Start</button>
-        <button type="button" id="btn-pane" class="ghost" hidden>TUI</button>
-        <button type="button" id="btn-yes" class="ghost" hidden>Yes</button>
-        <button type="button" id="btn-no" class="ghost" hidden>No</button>
-        <button type="button" id="btn-stop" class="ghost danger" hidden>Stop</button>
-      </div>
-    </header>
     <div id="session-bar" hidden>
       <label>Project
         <select id="project"></select>
@@ -59,16 +46,32 @@
         Resume last CLI chat
       </label>
     </div>
-    <section id="log" class="log"></section>
-    <pre id="pane" hidden></pre>
+    <div id="chat">
+      <section id="log" class="log"></section>
+      <div id="tui" hidden>
+        <header>
+          <strong>TUI</strong>
+          <span>type here — keys go to the CLI</span>
+          <button type="button" id="btn-tui-close" class="ghost tiny">Close</button>
+        </header>
+        <pre id="pane" tabindex="0"></pre>
+      </div>
+    </div>
+    <p id="status" hidden></p>
     <form id="composer">
       <textarea id="input" rows="2" placeholder="Message the native CLI…" disabled></textarea>
       <div class="row">
-        <button type="button" id="btn-int" class="ghost" disabled>Interrupt</button>
+        <div class="actions">
+          <button type="button" id="btn-pane" class="ghost" hidden>TUI</button>
+          <button type="button" id="btn-yes" class="ghost" hidden>Yes</button>
+          <button type="button" id="btn-no" class="ghost" hidden>No</button>
+          <button type="button" id="btn-int" class="ghost" hidden>Interrupt</button>
+          <button type="button" id="btn-stop" class="ghost danger" hidden>Stop</button>
+        </div>
         <button type="submit" id="btn-send" disabled>Send</button>
       </div>
     </form>
   </main>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>

@@ -426,18 +426,51 @@ def stop_send_queue(sid: str) -> None:
 
 
 def tmux_send_keys(name: str, keys: list[str]) -> None:
-    mapped = []
+    named = {
+        "Enter": "Enter",
+        "Escape": "Escape",
+        "Esc": "Escape",
+        "Tab": "Tab",
+        "BSpace": "BSpace",
+        "Backspace": "BSpace",
+        "DC": "DC",
+        "Delete": "DC",
+        "Left": "Left",
+        "Right": "Right",
+        "Up": "Up",
+        "Down": "Down",
+        "Home": "Home",
+        "End": "End",
+        "PPage": "PPage",
+        "NPage": "NPage",
+        "C-c": "C-c",
+        "C-d": "C-d",
+        "C-u": "C-u",
+        "C-a": "C-a",
+        "C-e": "C-e",
+        "C-k": "C-k",
+        "C-w": "C-w",
+        "C-l": "C-l",
+        "C-n": "C-n",
+        "C-p": "C-p",
+        "Space": "Space",
+    }
+    literal: list[str] = []
+
+    def flush_literal() -> None:
+        if not literal:
+            return
+        text = "".join(literal)
+        literal.clear()
+        tmux("send-keys", "-t", name, "-l", "--", text)
+
     for k in keys:
-        if k in ("Enter", "Escape", "C-c", "C-d", "Tab", "BSpace"):
-            mapped.append(k)
-        elif k == "Esc":
-            mapped.append("Escape")
-        elif len(k) == 1:
-            mapped.append(k)
-        else:
-            mapped.append(k)
-    if mapped:
-        tmux("send-keys", "-t", name, *mapped)
+        if k in named:
+            flush_literal()
+            tmux("send-keys", "-t", name, named[k])
+        elif k:
+            literal.append(k)
+    flush_literal()
 
 
 def claimed_transcripts(except_sid: str | None = None) -> set[str]:
@@ -726,7 +759,7 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         **session_meta(sess),
-        "pane": pane[-8000:],
+        "pane": pane,
         "busy": busy,
         "command": cmd,
         "messages": messages,
@@ -1180,7 +1213,7 @@ class Handler(BaseHTTPRequestHandler):
                     busy = pane_busy(pane)
                     chunk = (
                         "event: pane\ndata: "
-                        + json.dumps({"pane": pane[-8000:], "busy": busy}, ensure_ascii=False)
+                        + json.dumps({"pane": pane, "busy": busy}, ensure_ascii=False)
                         + "\n\n"
                     )
                     self.wfile.write(chunk.encode("utf-8"))
