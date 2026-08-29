@@ -192,28 +192,32 @@ function closeMenu() {
 }
 
 function applyChrome() {
-  const live = Boolean(state.session);
-  const draft = state.draft && !live;
+  const sess = state.session;
+  const running = Boolean(sess?.live);
+  const viewing = Boolean(sess);
+  const draft = state.draft && !viewing;
   $("session-bar").hidden = !draft;
   $("input").disabled = !canCompose() || state.paneOpen;
   $("input").placeholder = draft
     ? "Send a message or paste a screenshot to start…"
-    : "Message the native CLI… paste a screenshot";
+    : viewing && !running
+      ? "Send a message to resume this session…"
+      : "Message the native CLI… paste a screenshot";
   $("btn-send").disabled = !canCompose() || state.paneOpen;
-  $("btn-int").hidden = !live;
-  $("btn-stop").hidden = !live;
-  $("btn-pane").hidden = !(live && state.session?.tmux);
-  $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && live));
-  $("btn-yes").hidden = !(live && state.session?.tmux);
-  $("btn-no").hidden = !(live && state.session?.tmux);
-  if (live && state.session?.tmux && state.paneOpen) {
+  $("btn-int").hidden = !running;
+  $("btn-stop").hidden = !running;
+  $("btn-pane").hidden = !(running && sess?.tmux);
+  $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && running));
+  $("btn-yes").hidden = !(running && sess?.tmux);
+  $("btn-no").hidden = !(running && sess?.tmux);
+  if (running && sess?.tmux && state.paneOpen) {
     $("tui").hidden = false;
   } else {
     $("tui").hidden = true;
   }
-  if (live) {
-    $("agent").value = state.session.agent || state.agent;
-    if (state.session.cwd) $("project").value = state.session.cwd;
+  if (viewing) {
+    $("agent").value = sess.agent || state.agent;
+    if (sess.cwd) $("project").value = sess.cwd;
   } else if (draft) {
     $("agent").value = state.agent;
     $("project").value = state.cwd || "";
@@ -223,8 +227,8 @@ function applyChrome() {
     $("tui").hidden = true;
   }
   const title = $("mobile-title");
-  if (state.session) title.textContent = sessionLabel(state.session);
-  else if (state.draft) title.textContent = "New session";
+  if (sess) title.textContent = sessionLabel(sess);
+  else if (draft) title.textContent = "New session";
   else title.textContent = "wrap";
   $("btn-menu").classList.toggle("ping", Boolean(state.pingSid));
   setHash();
@@ -278,7 +282,7 @@ function sessionLabel(s) {
 function isActiveRow(s) {
   if (!state.session) return false;
   if (s.live) return s.id === state.session.id;
-  const native = state.session.cli_session || state.session.oc_id || "";
+  const native = state.session.native_id || state.session.cli_session || state.session.oc_id || "";
   return Boolean(s.native_id && s.native_id === native && s.agent === state.session.agent);
 }
 
@@ -339,7 +343,7 @@ function renderSessions() {
   closedHead.hidden = !showClosed;
   closedUl.hidden = !showClosed;
   for (const s of closed) {
-    closedUl.appendChild(sessionRow(s, () => resumeHistory(s)));
+    closedUl.appendChild(sessionRow(s, () => peekHistory(s)));
   }
   $("btn-menu").classList.toggle("ping", Boolean(state.pingSid));
 }
@@ -435,9 +439,11 @@ function renderMessages(messages) {
   if (!messages.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = state.session?.agent === "opencode"
-      ? "Session is up. Send a message — it goes to the native CLI."
-      : "Waiting for the CLI transcript… send a message, bubbles show up here.";
+    empty.textContent = !state.session?.live
+      ? "This session is closed. Send a message to resume it."
+      : state.session?.agent === "opencode"
+        ? "Session is up. Send a message — it goes to the native CLI."
+        : "Waiting for the CLI transcript… send a message, bubbles show up here.";
     log.appendChild(empty);
     return;
   }
@@ -654,28 +660,61 @@ async function startSession() {
   }
 }
 
-async function resumeHistory(item) {
+async function peekHistory(item) {
   if (!item?.native_id || !item.cwd) return;
+  if (state.es) {
+    state.es.close();
+    state.es = null;
+  }
   setStatus("");
   state.agent = item.agent;
+  state.cwd = item.cwd;
   applyCatalog();
+  try {
+    const q = new URLSearchParams({
+      agent: item.agent,
+      native: item.native_id,
+      cwd: item.cwd,
+    });
+    const sess = await api(`/api/history?${q}`);
+    renderSession(sess);
+    closeMenu();
+  } catch (err) {
+    setStatus(err.message || String(err));
+  }
+}
+
+async function wakeClosed(peek) {
+  if (!peek?.native_id && !peek?.cli_session && !peek?.oc_id) return null;
+  savePrefs();
+  setStatus("");
+  $("btn-send").disabled = true;
   try {
     const sess = await api("/api/sessions", {
       method: "POST",
       body: JSON.stringify({
-        agent: item.agent,
-        cwd: item.cwd,
-        resume: item.native_id,
+        agent: peek.agent,
+        cwd: peek.cwd,
+        resume: peek.native_id || peek.cli_session || peek.oc_id,
         model: $("model").value,
         effort: $("effort").value,
         fast: $("fast").checked,
+        title: peek.title || "",
       }),
     });
+    const oldId = peek.id;
+    if (oldId && oldId !== sess.id && state.pending[oldId]) {
+      state.pending[sess.id] = (state.pending[sess.id] || []).concat(state.pending[oldId]);
+      delete state.pending[oldId];
+    }
     renderSession(sess);
     connectStream(sess.id);
     loadSessions();
+    return sess;
   } catch (err) {
     setStatus(err.message || String(err));
+    applyChrome();
+    return null;
   }
 }
 
@@ -708,6 +747,9 @@ async function sendMessage(ev) {
   if (!text) return;
   if (!state.session) {
     const sess = await startSession();
+    if (!sess) return;
+  } else if (!state.session.live) {
+    const sess = await wakeClosed(state.session);
     if (!sess) return;
   }
   $("input").value = "";
@@ -946,6 +988,12 @@ function onHash() {
   const id = (location.hash || "#").slice(1);
   if (id === "new") {
     if (!state.draft) openDraft();
+    return;
+  }
+  if (id.startsWith("h:")) {
+    if (state.session?.id === id) return;
+    const item = (state.history || []).find((s) => s.id === id);
+    if (item) peekHistory(item);
     return;
   }
   if (id && (!state.session || state.session.id !== id)) {

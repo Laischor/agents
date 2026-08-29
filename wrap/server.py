@@ -1177,6 +1177,74 @@ def list_history() -> list[dict[str, Any]]:
     )
 
 
+def history_transcript(agent: str, cwd: Path, native_id: str) -> Path | None:
+    native_id = (native_id or "").strip()
+    if not native_id:
+        return None
+    for path in tr.list_transcripts(agent, cwd, CLAUDE_HOME, CURSOR_HOME):
+        if agent == "claude" and path.stem == native_id:
+            return path
+        if agent == "cursor" and path.parent.name == native_id:
+            return path
+    return None
+
+
+def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
+    """Read a closed native session without starting the CLI."""
+    if agent not in AGENTS:
+        raise ValueError(f"unknown agent: {agent}")
+    native_id = (native_id or "").strip()
+    if not native_id:
+        raise ValueError("native_id required")
+    messages: list[dict[str, Any]] = []
+    transcript = ""
+    title = ""
+    if agent == "opencode":
+        messages = tr.parse_opencode_session(tr.opencode_db_path(), native_id)
+        title = tr.opencode_session_title(tr.opencode_db_path(), native_id) or ""
+    else:
+        path = history_transcript(agent, cwd, native_id)
+        if not path:
+            raise KeyError(native_id)
+        transcript = str(path)
+        messages = tr.parse_jsonl(agent, path)
+        title = (
+            tr.native_session_title(
+                agent,
+                transcript=path,
+                cli_session=native_id if agent == "claude" else "",
+                oc_id="",
+                claude_home=CLAUDE_HOME,
+                cursor_home=CURSOR_HOME,
+            )
+            or ""
+        )
+    if title and tr.is_wrap_default_title(title):
+        title = ""
+    return {
+        "id": f"h:{agent}:{native_id}",
+        "agent": agent,
+        "cwd": str(cwd),
+        "tmux": None,
+        "oc_id": native_id if agent == "opencode" else "",
+        "transcript": transcript,
+        "title": title,
+        "model": "",
+        "effort": "",
+        "fast": False,
+        "created": "",
+        "cli_session": native_id if agent in ("claude", "cursor") else "",
+        "native_id": native_id,
+        "pane": "",
+        "busy": False,
+        "subagents": [],
+        "choice": None,
+        "command": "",
+        "messages": messages,
+        "live": False,
+    }
+
+
 def open_session(
     agent: str,
     cwd: Path,
@@ -1402,6 +1470,12 @@ class Handler(BaseHTTPRequestHandler):
                 st, raw, ct = json_bytes(
                     {"sessions": list_sessions(cwd, agent), "history": list_history()}
                 )
+                return self._send(st, raw, ct)
+            if path == "/api/history":
+                agent = str((qs.get("agent") or [""])[0] or "")
+                native = str((qs.get("native") or [""])[0] or "")
+                cwd = safe_cwd(str((qs.get("cwd") or [""])[0] or ""))
+                st, raw, ct = json_bytes(history_public(agent, native, cwd))
                 return self._send(st, raw, ct)
             if path == "/api/file":
                 raw_path = (qs.get("path") or [""])[0]
