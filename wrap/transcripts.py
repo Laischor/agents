@@ -1,10 +1,9 @@
-"""Parse native Claude / Cursor JSONL and OpenCode SQLite transcripts."""
+"""Parse native Claude / Cursor JSONL transcripts."""
 
 from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import time
 from difflib import unified_diff
 from pathlib import Path
@@ -567,74 +566,6 @@ def newest_transcript(agent: str, cwd: Path, claude_home: Path, cursor_home: Pat
     return max(files, key=lambda p: p.stat().st_mtime)
 
 
-def opencode_db_path() -> Path:
-    xdg = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
-    return xdg
-
-
-def parse_opencode_session(db_path: Path, session_id: str, limit: int = 300) -> list[dict[str, Any]]:
-    if not db_path.is_file():
-        return []
-    conn = sqlite3.connect(str(db_path), timeout=2)
-    conn.row_factory = sqlite3.Row
-    try:
-        messages = conn.execute(
-            "SELECT id, time_created, data FROM message WHERE session_id = ? "
-            "ORDER BY time_created ASC, id ASC",
-            (session_id,),
-        ).fetchall()
-        parts = conn.execute(
-            "SELECT message_id, data FROM part WHERE session_id = ? "
-            "ORDER BY time_created ASC, id ASC",
-            (session_id,),
-        ).fetchall()
-    finally:
-        conn.close()
-
-    by_msg: dict[str, list[dict[str, Any]]] = {}
-    for row in parts:
-        try:
-            data = json.loads(row["data"])
-        except json.JSONDecodeError:
-            continue
-        by_msg.setdefault(row["message_id"], []).append(data)
-
-    out: list[dict[str, Any]] = []
-    for row in messages:
-        try:
-            info = json.loads(row["data"])
-        except json.JSONDecodeError:
-            continue
-        role = info.get("role") or "assistant"
-        parts: list[dict[str, Any]] = []
-        for part in by_msg.get(row["id"], []):
-            kind = part.get("type")
-            if kind == "text" and part.get("text"):
-                parts.append({"type": "text", "text": part["text"]})
-            elif kind == "tool":
-                tool = str(part.get("tool") or part.get("name") or "tool")
-                st = part.get("state") if isinstance(part.get("state"), dict) else {}
-                inp = st.get("input") if isinstance(st.get("input"), dict) else part.get("input")
-                hunks = diffs_from_tool(tool, inp)
-                if hunks:
-                    for h in hunks:
-                        parts.append({"type": "diff", **h})
-                else:
-                    parts.append({"type": "tool", "name": tool})
-        if not parts:
-            continue
-        out.append(
-            {
-                "id": row["id"],
-                "role": "user" if role == "user" else "assistant",
-                "text": _parts_text(parts),
-                "parts": parts,
-                "ts": row["time_created"],
-            }
-        )
-    return out[-limit:]
-
-
 def is_wrap_default_title(title: str) -> bool:
     return bool(WRAP_DEFAULT_TITLE_RE.search(title or ""))
 
@@ -709,36 +640,16 @@ def cursor_session_title(cursor_home: Path, transcript: Path) -> str | None:
     return None
 
 
-def opencode_session_title(db_path: Path, session_id: str) -> str | None:
-    if not session_id or not db_path.is_file():
-        return None
-    conn = sqlite3.connect(str(db_path), timeout=2)
-    try:
-        row = conn.execute("SELECT title FROM session WHERE id = ?", (session_id,)).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        conn.close()
-    if not row:
-        return None
-    title = str(row[0] or "").strip()
-    return title or None
-
-
 def native_session_title(
     agent: str,
     *,
     transcript: Path | None = None,
     cli_session: str = "",
-    oc_id: str = "",
     claude_home: Path,
     cursor_home: Path,
     registry: dict[str, dict[str, str]] | None = None,
 ) -> str | None:
     """Name the agent assigned to the tab/session, if we can read it."""
-    if agent == "opencode":
-        title = opencode_session_title(opencode_db_path(), oc_id)
-        return None if title and is_wrap_default_title(title) else title
     if agent == "cursor":
         if not transcript:
             return None
@@ -761,70 +672,6 @@ def native_session_title(
     return None
 
 
-def latest_opencode_session(db_path: Path, cwd: str) -> dict[str, Any] | None:
-    if not db_path.is_file():
-        return None
-    conn = sqlite3.connect(str(db_path), timeout=2)
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            "SELECT id, directory, title, time_updated FROM session "
-            "WHERE directory = ? AND time_archived IS NULL "
-            "ORDER BY time_updated DESC LIMIT 1",
-            (cwd,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return None
-    return {
-        "id": row["id"],
-        "directory": row["directory"],
-        "title": row["title"],
-        "time_updated": row["time_updated"],
-    }
-
-
-def _oc_time_sec(raw: Any) -> float:
-    try:
-        n = float(raw or 0)
-    except (TypeError, ValueError):
-        return 0.0
-    if n > 1e12:
-        return n / 1000.0
-    return n
-
-
-def list_opencode_sessions(db_path: Path) -> list[dict[str, Any]]:
-    if not db_path.is_file():
-        return []
-    conn = sqlite3.connect(str(db_path), timeout=2)
-    conn.row_factory = sqlite3.Row
-    try:
-        try:
-            rows = conn.execute(
-                "SELECT id, directory, title, time_updated FROM session "
-                "WHERE time_archived IS NULL"
-            ).fetchall()
-        except sqlite3.Error:
-            rows = conn.execute(
-                "SELECT id, directory, title, time_updated FROM session"
-            ).fetchall()
-    finally:
-        conn.close()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        out.append(
-            {
-                "id": str(row["id"]),
-                "directory": str(row["directory"] or ""),
-                "title": str(row["title"] or "").strip(),
-                "updated": _oc_time_sec(row["time_updated"]),
-            }
-        )
-    return out
-
-
 def list_native_history(
     projects: list[Path],
     *,
@@ -834,9 +681,9 @@ def list_native_history(
     skip: set[tuple[str, str]] | None = None,
     limit: int = 80,
 ) -> list[dict[str, Any]]:
-    """Closed CLI sessions from native stores (no wrap DB)."""
+    """Closed CLI sessions from native stores (no wrap DB). OpenCode history is listed via HTTP."""
     skip = skip or set()
-    root = host_projects.resolve()
+    _ = host_projects
     rows: list[tuple[float, dict[str, Any]]] = []
 
     def add(mtime: float, item: dict[str, Any]) -> None:
@@ -869,27 +716,6 @@ def list_native_history(
                     },
                 )
 
-    for oc in list_opencode_sessions(opencode_db_path()):
-        directory = oc["directory"]
-        if not directory:
-            continue
-        try:
-            d = Path(directory).resolve()
-        except OSError:
-            continue
-        if d != root and root not in d.parents:
-            continue
-        add(
-            oc["updated"],
-            {
-                "agent": "opencode",
-                "cwd": str(d),
-                "native_id": oc["id"],
-                "title": oc["title"],
-                "transcript": None,
-            },
-        )
-
     rows.sort(key=lambda item: item[0], reverse=True)
     out: list[dict[str, Any]] = []
     for mtime, item in rows[:limit]:
@@ -898,7 +724,6 @@ def list_native_history(
             str(item["agent"]),
             transcript=path,
             cli_session=str(item["native_id"] or "") if item["agent"] == "claude" else "",
-            oc_id=str(item["native_id"] or "") if item["agent"] == "opencode" else "",
             claude_home=claude_home,
             cursor_home=cursor_home,
             registry=registry,

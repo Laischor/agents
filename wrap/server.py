@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Native-session web wrap: tmux + transcripts (Claude/Cursor), OpenCode HTTP API.
 
-No extra model harness — the CLI process is the only API client.
+No extra model harness — Claude/Cursor stay on the live CLI; OpenCode uses
+`opencode serve` REST + SSE (the same surface as the TUI).
 """
 
 from __future__ import annotations
@@ -16,8 +17,6 @@ import sys
 import threading
 import time
 import uuid
-import urllib.error
-import urllib.request
 from collections import deque
 from queue import Queue
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +28,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import opencode as oc  # noqa: E402
 import transcripts as tr  # noqa: E402
 
 HOST = os.environ.get("WRAP_HOST", "0.0.0.0")
@@ -37,8 +37,6 @@ HOST_PROJECTS = Path(os.environ.get("HOST_PROJECTS", "/Users/mr/projects")).reso
 CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
 CURSOR_HOME = Path.home() / ".cursor"
 TMUX_SOCK = os.environ.get("WRAP_TMUX_SOCK", "/tmp/wrap.tmux.sock")
-OC_PORT = int(os.environ.get("WRAP_OPENCODE_PORT", "4097"))
-OC_URL = os.environ.get("WRAP_OPENCODE_URL", f"http://127.0.0.1:{OC_PORT}")
 STATIC = ROOT / "static"
 STATE_PATH = Path(os.environ.get("WRAP_STATE", "/var/lib/wrap/state.json"))
 AGENTS = ("claude", "cursor", "opencode")
@@ -66,8 +64,6 @@ EFFORT_LEVELS = [
 
 _lock = threading.RLock()
 SESSIONS: dict[str, dict[str, Any]] = {}
-_oc_proc: subprocess.Popen[bytes] | None = None
-_oc_lock = threading.Lock()
 _catalog_lock = threading.Lock()
 _catalog_cache: dict[str, Any] = {"at": 0.0, "data": None}
 _send_q: dict[str, Queue[str | None]] = {}
@@ -334,6 +330,13 @@ def shutil_which(name: str) -> str | None:
     return which(name)
 
 
+def _oc_warmup() -> None:
+    try:
+        oc.ensure_serve()
+    except Exception as exc:  # noqa: BLE001
+        log(f"opencode warmup: {exc}")
+
+
 def tmux_ok() -> bool:
     return shutil_which("tmux") is not None
 
@@ -357,7 +360,8 @@ def pane_busy(pane: str) -> bool:
 
 
 def session_subagents(sess: dict[str, Any]) -> list[dict[str, Any]]:
-    """Claude only: subagents the parent jsonl still lists as running."""
+    if sess.get("agent") == "opencode" and sess.get("oc_id"):
+        return oc.subagents(str(sess["oc_id"]), sess.get("cwd") or "")
     if sess.get("agent") != "claude":
         return []
     raw = sess.get("transcript")
@@ -371,6 +375,8 @@ def session_subagents(sess: dict[str, Any]) -> list[dict[str, Any]]:
 
 def session_choice(sess: dict[str, Any]) -> dict[str, Any] | None:
     agent = str(sess.get("agent") or "")
+    if agent == "opencode" and sess.get("oc_id"):
+        return oc.pending_choice(str(sess["oc_id"]), sess.get("cwd") or "")
     if agent not in ("claude", "cursor"):
         return None
     raw = sess.get("transcript")
@@ -390,6 +396,29 @@ def send_choice_keys(name: str, picks: list[int]) -> None:
         tmux_send_keys(name, keys)
         if i < len(picks) - 1:
             time.sleep(0.15)
+
+
+def apply_oc_choice(sess: dict[str, Any], choice: dict[str, Any], picks: list[int]) -> None:
+    oc_id = str(sess.get("oc_id") or "")
+    cwd = Path(sess["cwd"])
+    kind = str(choice.get("kind") or "")
+    questions = choice.get("questions") or []
+    if kind == "permission":
+        opts = (questions[0] or {}).get("options") or []
+        reply = str((opts[picks[0]] or {}).get("reply") or "")
+        if reply not in ("once", "always", "reject"):
+            reply = ("once", "always", "reject")[picks[0]]
+        oc.reply_permission(oc_id, str(choice["id"]), cwd, reply)
+        return
+    if kind == "question":
+        answers: list[list[str]] = []
+        for i, n in enumerate(picks):
+            opts = (questions[i] or {}).get("options") or []
+            label = str((opts[n] or {}).get("label") or "")
+            answers.append([label] if label else [])
+        oc.reply_question(str(choice["id"]), cwd, answers)
+        return
+    raise RuntimeError("unknown OpenCode choice")
 
 
 def tmux_alive_command(name: str) -> str:
@@ -439,6 +468,7 @@ def session_meta(sess: dict[str, Any]) -> dict[str, Any]:
         "fast": bool(sess.get("fast")),
         "created": sess.get("created") or "",
         "cli_session": sess.get("cli_session") or "",
+        "native_id": sess.get("oc_id") or sess.get("cli_session") or "",
     }
 
 
@@ -458,17 +488,18 @@ def apply_native_title(
 ) -> bool:
     """Replace wrap's placeholder title with the name the agent assigned."""
     native = ""
-    if sess.get("tmux") and tmux_has(str(sess["tmux"])):
+    if sess.get("agent") == "opencode" and sess.get("oc_id"):
+        native = oc.session_title(str(sess["oc_id"]), sess.get("cwd") or "")
+    elif sess.get("tmux") and tmux_has(str(sess["tmux"])):
         pane_title = tmux_pane_title(str(sess["tmux"]))
         if pane_title and not tr.is_wrap_default_title(pane_title):
             native = pane_title
-    if not native:
+    if not native and sess.get("agent") != "opencode":
         path = sess.get("transcript")
         native = tr.native_session_title(
             str(sess.get("agent") or ""),
             transcript=Path(path) if path else None,
             cli_session=str(sess.get("cli_session") or ""),
-            oc_id=str(sess.get("oc_id") or ""),
             claude_home=CLAUDE_HOME,
             cursor_home=CURSOR_HOME,
             registry=registry,
@@ -620,14 +651,15 @@ def oc_send_text(sess: dict[str, Any], text: str) -> None:
     oc_id = sess.get("oc_id")
     if not oc_id:
         raise RuntimeError("no opencode session")
-    body: dict[str, Any] = {"parts": [{"type": "text", "text": text}]}
-    ref = oc_model_ref(str(sess.get("model") or ""), str(sess.get("effort") or ""))
-    if ref:
-        body["model"] = ref
-    try:
-        oc_request("POST", f"/session/{oc_id}/prompt_async", Path(sess["cwd"]), body)
-    except RuntimeError:
-        oc_request("POST", f"/session/{oc_id}/message", Path(sess["cwd"]), body)
+    cwd = Path(sess["cwd"])
+    oc.wait_idle(str(oc_id), cwd)
+    oc.prompt_async(
+        str(oc_id),
+        cwd,
+        text,
+        model=str(sess.get("model") or ""),
+        effort=str(sess.get("effort") or ""),
+    )
 
 
 def enqueue_send(sid: str, text: str) -> None:
@@ -822,84 +854,6 @@ def snapshot_transcripts(agent: str, cwd: Path) -> dict[str, float]:
     return out
 
 
-def oc_health() -> bool:
-    try:
-        with urllib.request.urlopen(f"{OC_URL}/global/health", timeout=1) as resp:
-            return 200 <= resp.status < 300
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return False
-
-
-def ensure_opencode_serve() -> None:
-    global _oc_proc
-    if oc_health():
-        return
-    with _oc_lock:
-        if oc_health():
-            return
-        binary = shutil_which("opencode")
-        if not binary:
-            raise RuntimeError("opencode binary missing")
-        log_path = Path(os.environ.get("WRAP_OPENCODE_LOG", "/var/log/opencode-serve.log"))
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(log_path, "ab")
-        _oc_proc = subprocess.Popen(
-            [binary, "serve", "--hostname", "127.0.0.1", "--port", str(OC_PORT)],
-            stdout=fh,
-            stderr=fh,
-            start_new_session=True,
-        )
-        for _ in range(40):
-            if oc_health():
-                log(f"opencode serve ready pid={_oc_proc.pid} port={OC_PORT}")
-                return
-            time.sleep(0.25)
-        raise RuntimeError("opencode serve failed to start (see /var/log/opencode-serve.log)")
-
-
-def oc_request(method: str, path: str, cwd: Path, body: dict[str, Any] | None = None) -> Any:
-    ensure_opencode_serve()
-    data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(
-        f"{OC_URL}{path}",
-        data=data,
-        method=method,
-        headers={
-            "Content-Type": "application/json",
-            "x-opencode-directory": str(cwd),
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read()
-            if not raw:
-                return None
-            return json.loads(raw.decode())
-    except urllib.error.HTTPError as exc:
-        err = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"opencode {method} {path}: {exc.code} {err[:400]}") from exc
-
-
-def oc_create(cwd: Path, title: str) -> str:
-    created = oc_request("POST", "/session", cwd, {"title": title or Path(cwd).name})
-    if isinstance(created, dict):
-        sid = created.get("id") or created.get("sessionID") or (created.get("info") or {}).get("id")
-        if sid:
-            return str(sid)
-    raise RuntimeError("opencode did not return a session id")
-
-
-def oc_model_ref(model: str, effort: str) -> dict[str, str] | None:
-    model = (model or "").strip()
-    if not model or "/" not in model:
-        return None
-    provider, model_id = model.split("/", 1)
-    ref: dict[str, str] = {"providerID": provider, "modelID": model_id}
-    if effort:
-        ref["variant"] = effort
-    return ref
-
-
 def run_lines(cmd: list[str], timeout: float = 20.0) -> list[str]:
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
@@ -935,8 +889,9 @@ def catalog() -> dict[str, Any]:
 
     cursor_models = [{"id": "", "label": "CLI default"}]
     cursor_models.extend(parse_labeled_models(run_lines(["agent", "models"])))
-    oc_models = [{"id": "", "label": "CLI default"}]
-    oc_models.extend(parse_labeled_models(run_lines(["opencode", "models"])))
+    oc_models = oc.providers(HOST_PROJECTS if HOST_PROJECTS.is_dir() else None)
+    if len(oc_models) <= 1:
+        oc_models.extend(parse_labeled_models(run_lines(["opencode", "models"])))
 
     data = {
         "claude": {
@@ -1008,16 +963,20 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
         pane = tmux_capture(sess["tmux"])
         cmd = tmux_alive_command(sess["tmux"])
         busy = pane_busy(pane)
+    elif sess.get("agent") == "opencode" and sess.get("oc_id"):
+        busy = oc.session_busy(str(sess["oc_id"]), sess.get("cwd") or "")
     messages = load_messages(sess)
     live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or (
         sess["agent"] == "opencode" and bool(sess.get("oc_id"))
     )
     subagents = session_subagents(sess)
     choice = session_choice(sess)
+    if choice:
+        busy = True
     return {
         **session_meta(sess),
         "pane": pane,
-        "busy": busy or bool(subagents) or bool(choice),
+        "busy": busy or bool(subagents),
         "subagents": subagents,
         "choice": choice,
         "command": cmd,
@@ -1031,7 +990,7 @@ def load_messages(sess: dict[str, Any]) -> list[dict[str, Any]]:
         oc_id = sess.get("oc_id")
         if not oc_id:
             return []
-        return tr.parse_opencode_session(tr.opencode_db_path(), oc_id)
+        return oc.list_messages(str(oc_id), sess.get("cwd") or "")
     path = ensure_transcript(sess)
     if not path:
         return []
@@ -1040,12 +999,16 @@ def load_messages(sess: dict[str, Any]) -> list[dict[str, Any]]:
 
 def fingerprint(sess: dict[str, Any]) -> str:
     if sess["agent"] == "opencode":
-        db = tr.opencode_db_path()
-        try:
-            st = db.stat()
-            return f"oc:{sess.get('oc_id')}:{st.st_mtime}:{st.st_size}:{sess.get('title') or ''}"
-        except OSError:
-            return f"oc:{sess.get('oc_id')}"
+        oc_id = str(sess.get("oc_id") or "")
+        cwd = sess.get("cwd") or ""
+        choice = session_choice(sess)
+        cid = (choice or {}).get("id") or ""
+        msgs = load_messages(sess)
+        last = msgs[-1] if msgs else {}
+        return (
+            f"oc:{oc_id}:{len(msgs)}:{last.get('id')}:{len(last.get('text') or '')}:"
+            f"{int(oc.session_busy(oc_id, cwd))}:{cid}:{sess.get('title') or ''}"
+        )
     path = ensure_transcript(sess)
     if not path:
         files = tr.list_transcripts(sess["agent"], Path(sess["cwd"]), CLAUDE_HOME, CURSOR_HOME)
@@ -1168,13 +1131,21 @@ def list_history() -> list[dict[str, Any]]:
         key = native_key(sess)
         if key[1]:
             skip.add(key)
-    return tr.list_native_history(
+    oc_skip = {key[1] for key in skip if key[0] == "opencode"}
+    cli = tr.list_native_history(
         projects,
         claude_home=CLAUDE_HOME,
         cursor_home=CURSOR_HOME,
         host_projects=HOST_PROJECTS,
         skip=skip,
     )
+    try:
+        oc_rows = oc.history_rows(projects, skip=oc_skip)
+    except RuntimeError:
+        oc_rows = []
+    merged = cli + oc_rows
+    merged.sort(key=lambda item: float(item.get("updated") or 0), reverse=True)
+    return merged[:80]
 
 
 def history_transcript(agent: str, cwd: Path, native_id: str) -> Path | None:
@@ -1200,8 +1171,8 @@ def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
     transcript = ""
     title = ""
     if agent == "opencode":
-        messages = tr.parse_opencode_session(tr.opencode_db_path(), native_id)
-        title = tr.opencode_session_title(tr.opencode_db_path(), native_id) or ""
+        messages = oc.list_messages(native_id, cwd)
+        title = oc.session_title(native_id, cwd)
     else:
         path = history_transcript(agent, cwd, native_id)
         if not path:
@@ -1213,7 +1184,6 @@ def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
                 agent,
                 transcript=path,
                 cli_session=native_id if agent == "claude" else "",
-                oc_id="",
                 claude_home=CLAUDE_HOME,
                 cursor_home=CURSOR_HOME,
             )
@@ -1268,7 +1238,7 @@ def open_session(
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     if agent == "opencode":
-        oc_id = resume_id or oc_create(cwd, user_title or cwd.name)
+        oc_id = resume_id or oc.create_session(cwd, user_title or cwd.name)
         sess = {
             "id": sid,
             "agent": "opencode",
@@ -1376,6 +1346,12 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
         if sess.get("tmux"):
             pane = tmux_capture(sess["tmux"])
             pub["busy"] = pane_busy(pane) or bool(subagents) or bool(choice)
+        elif sess.get("agent") == "opencode" and sess.get("oc_id"):
+            pub["busy"] = (
+                oc.session_busy(str(sess["oc_id"]), sess.get("cwd") or "")
+                or bool(subagents)
+                or bool(choice)
+            )
         elif subagents or choice:
             pub["busy"] = True
         out.append(pub)
@@ -1388,6 +1364,11 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
 def kill_session(sid: str) -> None:
     stop_send_queue(sid)
     sess = get_session(sid)
+    if sess.get("agent") == "opencode" and sess.get("oc_id"):
+        try:
+            oc.abort(str(sess["oc_id"]), Path(sess["cwd"]))
+        except RuntimeError:
+            pass
     if sess.get("tmux"):
         tmux("kill-session", "-t", sess["tmux"])
     with _lock:
@@ -1449,7 +1430,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "tmux": tmux_ok(),
                     "opencode": shutil_which("opencode") is not None,
-                    "opencode_serve": oc_health(),
+                    "opencode_serve": oc.health(),
                     "host_projects": str(HOST_PROJECTS),
                 }
                 st, raw, ct = json_bytes(body)
@@ -1575,7 +1556,7 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 sess = get_session(m.group(1))
                 if sess["agent"] == "opencode" and sess.get("oc_id"):
-                    oc_request("POST", f"/session/{sess['oc_id']}/abort", Path(sess["cwd"]), {})
+                    oc.abort(str(sess["oc_id"]), Path(sess["cwd"]))
                 elif sess.get("tmux"):
                     tmux_send_keys(sess["tmux"], ["Escape"])
                 else:
@@ -1585,8 +1566,6 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/sessions/([^/]+)/choose", path)
             if m:
                 sess = get_session(m.group(1))
-                if not sess.get("tmux"):
-                    raise RuntimeError("no tmux pane for this session")
                 choice = session_choice(sess)
                 if not choice:
                     raise ValueError("no pending choice")
@@ -1606,7 +1585,12 @@ class Handler(BaseHTTPRequestHandler):
                     if n < 0 or n >= len(opts):
                         raise ValueError("option out of range")
                     idxs.append(n)
-                send_choice_keys(str(sess["tmux"]), idxs)
+                if sess["agent"] == "opencode":
+                    apply_oc_choice(sess, choice, idxs)
+                else:
+                    if not sess.get("tmux"):
+                        raise RuntimeError("no tmux pane for this session")
+                    send_choice_keys(str(sess["tmux"]), idxs)
                 st, raw, ct = json_bytes({"ok": True})
                 return self._send(st, raw, ct)
             self._send(404, b'{"error":"not found"}', "application/json")
@@ -1703,6 +1687,35 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(b"event: gone\ndata: {}\n\n")
                     self.wfile.flush()
                     return
+                if sess.get("agent") == "opencode":
+                    payload = session_public(sess)
+                    fp = json.dumps(
+                        {
+                            "t": payload.get("title"),
+                            "b": payload.get("busy"),
+                            "c": (payload.get("choice") or {}).get("id"),
+                            "s": [x.get("id") for x in (payload.get("subagents") or [])],
+                            "m": [
+                                (
+                                    m.get("id"),
+                                    len(m.get("text") or ""),
+                                    tuple(
+                                        (p.get("type"), p.get("name"), p.get("status"), len(p.get("text") or ""))
+                                        for p in (m.get("parts") or [])
+                                    ),
+                                )
+                                for m in (payload.get("messages") or [])
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                    if fp != last:
+                        last = fp
+                        chunk = f"event: sync\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        self.wfile.write(chunk.encode("utf-8"))
+                        self.wfile.flush()
+                    oc.wait(str(sess.get("oc_id") or ""), timeout=0.35 if payload.get("busy") else 1.2)
+                    continue
                 fp = fingerprint(sess)
                 pane = tmux_capture(sess["tmux"]) if sess.get("tmux") else ""
                 subagents = session_subagents(sess)
@@ -1741,6 +1754,8 @@ def main() -> None:
     load_state()
     discover_tmux()
     install_cmux_shim()
+    if shutil_which("opencode"):
+        threading.Thread(target=_oc_warmup, daemon=True, name="wrap-oc-warmup").start()
     threading.Thread(target=_paste_sweeper, daemon=True, name="wrap-pastes").start()
     try:
         sweep_pastes(force=True)

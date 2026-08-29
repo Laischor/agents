@@ -123,13 +123,26 @@ function fillSelect(el, items, current) {
   if ([...el.options].some((o) => o.value === current)) el.value = current;
 }
 
+function sortModels(items) {
+  const head = [];
+  const rest = [];
+  for (const item of items || []) {
+    if (!item.id) head.push(item);
+    else rest.push(item);
+  }
+  rest.sort((a, b) =>
+    (a.label || a.id || "").localeCompare(b.label || b.id || "", undefined, { sensitivity: "base" }),
+  );
+  return head.concat(rest);
+}
+
 function applyCatalog() {
   const cat = state.catalog[state.agent] || { models: [], effort: [], fast: false };
   const prefs = loadPrefs();
   const model = state.session ? state.session.model || "" : prefs.model || "";
   const effort = state.session ? state.session.effort || "" : prefs.effort || "";
   const fast = state.session ? Boolean(state.session.fast) : Boolean(prefs.fast);
-  fillSelect($("model"), cat.models, model);
+  fillSelect($("model"), sortModels(cat.models), model);
   fillSelect($("effort"), cat.effort, effort);
   $("fast-wrap").hidden = !cat.fast;
   $("fast").checked = cat.fast ? fast : false;
@@ -196,20 +209,23 @@ function applyChrome() {
   const running = Boolean(sess?.live);
   const viewing = Boolean(sess);
   const draft = state.draft && !viewing;
+  const ocPerm = running && sess?.agent === "opencode" && sess?.choice?.kind === "permission";
   $("session-bar").hidden = !draft;
   $("input").disabled = !canCompose() || state.paneOpen;
   $("input").placeholder = draft
     ? "Send a message or paste a screenshot to start…"
     : viewing && !running
       ? "Send a message to resume this session…"
-      : "Message the native CLI… paste a screenshot";
+      : sess?.agent === "opencode"
+        ? "Message OpenCode… paste a screenshot"
+        : "Message the native CLI… paste a screenshot";
   $("btn-send").disabled = !canCompose() || state.paneOpen;
   $("btn-int").hidden = !running;
   $("btn-stop").hidden = !running;
   $("btn-pane").hidden = !(running && sess?.tmux);
   $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && running));
-  $("btn-yes").hidden = !(running && sess?.tmux);
-  $("btn-no").hidden = !(running && sess?.tmux);
+  $("btn-yes").hidden = !((running && sess?.tmux) || ocPerm);
+  $("btn-no").hidden = !((running && sess?.tmux) || ocPerm);
   if (running && sess?.tmux && state.paneOpen) {
     $("tui").hidden = false;
   } else {
@@ -436,25 +452,30 @@ function renderSession(sess) {
 function renderMessages(messages) {
   const log = $("log");
   log.innerHTML = "";
-  if (!messages.length) {
+  const busy = Boolean(state.session?.busy);
+  const rows = messages.slice();
+  if (busy && (!rows.length || rows[rows.length - 1].role === "user")) {
+    rows.push({ id: "streaming", role: "assistant", parts: [], text: "" });
+  }
+  if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = !state.session?.live
       ? "This session is closed. Send a message to resume it."
       : state.session?.agent === "opencode"
-        ? "Session is up. Send a message — it goes to the native CLI."
+        ? "Session is up. Send a message — it goes to OpenCode over HTTP."
         : "Waiting for the CLI transcript… send a message, bubbles show up here.";
     log.appendChild(empty);
     return;
   }
-  for (const m of messages) {
+  for (const m of rows) {
     const el = document.createElement("article");
     el.className = `msg ${m.role}`;
     const who = document.createElement("div");
     who.className = "who";
     if (m.pending) el.classList.add("pending");
     who.innerHTML =
-      (m.role === "assistant" && state.session?.busy ? `<span class="busy-dot"></span>` : "") +
+      (m.role === "assistant" && busy ? `<span class="busy-dot"></span>` : "") +
       (m.pending ? "queued" : m.role);
     el.appendChild(who);
     const parts = messageParts(m);
@@ -469,12 +490,16 @@ function renderMessages(messages) {
     };
     for (const p of parts) {
       if (p.type === "tool") {
-        if (p.name) toolBuf.push(p.name);
+        if (p.name) {
+          const running = p.status === "running" || p.status === "pending";
+          toolBuf.push(running ? `${p.name}…` : p.name);
+        }
         continue;
       }
       flushTools();
       if (p.type === "text" && p.text) el.appendChild(renderMessageBody(p.text));
       else if (p.type === "diff") el.appendChild(renderDiffBox(p));
+      else if (p.type === "image") el.appendChild(renderImagePart(p));
     }
     flushTools();
     log.appendChild(el);
@@ -489,6 +514,29 @@ function messageParts(m) {
   for (const d of m.diffs || []) out.push({ type: "diff", ...d });
   for (const name of m.tools || []) out.push({ type: "tool", name });
   return out;
+}
+
+function renderImagePart(p) {
+  const img = document.createElement("img");
+  img.className = "msg-img";
+  img.alt = p.filename || "image";
+  let src = p.url || "";
+  const path = p.path || "";
+  if (path) {
+    src = "/api/file?path=" + encodeURIComponent(path);
+  } else if (src.startsWith("file://")) {
+    let filePath = src.slice("file://".length);
+    try {
+      filePath = decodeURIComponent(filePath);
+    } catch (_) {
+      /* keep */
+    }
+    src = "/api/file?path=" + encodeURIComponent(filePath);
+  } else if (src.startsWith("/") && !src.startsWith("/api/")) {
+    src = "/api/file?path=" + encodeURIComponent(src);
+  }
+  img.src = src;
+  return img;
 }
 
 function renderDiffBox(d) {
@@ -1033,7 +1081,11 @@ $("btn-int").addEventListener("click", async () => {
 });
 $("btn-stop").addEventListener("click", async () => {
   if (!state.session) return;
-  if (!confirm("Stop this session? The CLI process exits. Other sessions stay up.")) return;
+  const stopMsg =
+    state.session.agent === "opencode"
+      ? "Close this OpenCode session in wrap? It stays in OpenCode history."
+      : "Stop this session? The CLI process exits. Other sessions stay up.";
+  if (!confirm(stopMsg)) return;
   try {
     await api(`/api/sessions/${state.session.id}`, { method: "DELETE" });
     clearMain();
@@ -1101,8 +1153,20 @@ function bindDrop(el) {
 bindDrop($("chat"));
 bindDrop($("composer"));
 bindDrop($("tui"));
-$("btn-yes").addEventListener("click", () => keys(["y", "Enter"]));
-$("btn-no").addEventListener("click", () => keys(["n", "Enter"]));
+$("btn-yes").addEventListener("click", () => {
+  if (state.session?.agent === "opencode" && state.session?.choice?.kind === "permission") {
+    submitChoice([0]);
+    return;
+  }
+  keys(["y", "Enter"]);
+});
+$("btn-no").addEventListener("click", () => {
+  if (state.session?.agent === "opencode" && state.session?.choice?.kind === "permission") {
+    submitChoice([2]);
+    return;
+  }
+  keys(["n", "Enter"]);
+});
 window.addEventListener("hashchange", onHash);
 
 let audioCtx = null;
