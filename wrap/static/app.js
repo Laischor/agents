@@ -14,6 +14,9 @@ const state = {
   catalog: {},
   sessions: [],
   history: [],
+  query: "",
+  searchHits: null,
+  searchGen: 0,
   projects: [],
   pending: {},
 };
@@ -302,7 +305,7 @@ function isActiveRow(s) {
   return Boolean(s.native_id && s.native_id === native && s.agent === state.session.agent);
 }
 
-function sessionRow(s, onClick) {
+function sessionRow(s, onClick, onRemove) {
   const li = document.createElement("li");
   if (isActiveRow(s)) li.classList.add("on");
   if (s.live && s.id && s.id === state.pingSid) li.classList.add("ping");
@@ -322,22 +325,62 @@ function sessionRow(s, onClick) {
   } else if (s.busy) {
     busy = '<span class="busy">working</span> · ';
   }
-  li.innerHTML = `<button type="button"><span class="sess-title">${escapeHtml(name)}</span><span class="sess-meta">${
+  const snip = s.snippet
+    ? `<span class="sess-snip">${escapeHtml(s.snippet)}</span>`
+    : "";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "sess-open";
+  btn.innerHTML = `<span class="sess-title">${escapeHtml(name)}</span><span class="sess-meta">${
     busy
-  }${escapeHtml(bits.filter(Boolean).join(" · "))}</span></button>`;
-  li.querySelector("button").addEventListener("click", onClick);
+  }${escapeHtml(bits.filter(Boolean).join(" · "))}</span>${snip}`;
+  btn.addEventListener("click", onClick);
+  li.appendChild(btn);
+  if (onRemove) {
+    li.classList.add("has-drop");
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.className = "sess-drop";
+    drop.setAttribute("aria-label", "Remove from list");
+    drop.title = "Remove from wrap list";
+    drop.textContent = "×";
+    drop.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onRemove();
+    });
+    li.appendChild(drop);
+  }
   return li;
+}
+
+function haySession(s) {
+  return [sessionLabel(s), projectName(s.cwd), agentLabel(s.agent), s.snippet || ""]
+    .join(" ")
+    .toLowerCase();
+}
+
+function matchesQuery(s, q) {
+  if (!q) return true;
+  return haySession(s).includes(q.toLowerCase());
+}
+
+function nativePair(s) {
+  return `${s.agent || ""}:${s.native_id || s.cli_session || s.oc_id || ""}`;
 }
 
 function renderSessions() {
   const ul = $("sessions");
   ul.innerHTML = "";
-  const live = state.sessions.filter((s) => s.live);
-  const closed = state.history || [];
-  if (state.draft) {
+  const q = (state.query || "").trim();
+  const live = (state.sessions || []).filter((s) => s.live).filter((s) => matchesQuery(s, q));
+  const closedSrc = q
+    ? state.searchHits || (state.history || []).filter((s) => matchesQuery(s, q))
+    : state.history || [];
+  if (state.draft && matchesQuery({ title: "New session", cwd: state.cwd, agent: state.agent }, q)) {
     const li = document.createElement("li");
     li.className = "draft on";
-    li.innerHTML = `<button type="button"><span class="sess-title">New session</span><span class="sess-meta">${
+    li.innerHTML = `<button type="button" class="sess-open"><span class="sess-title">New session</span><span class="sess-meta">${
       state.cwd ? `${escapeHtml(projectName(state.cwd))} · ${escapeHtml(agentLabel(state.agent))}` : "pick project &amp; agent"
     }</span></button>`;
     li.querySelector("button").addEventListener("click", () => openDraft());
@@ -346,7 +389,7 @@ function renderSessions() {
   if (!live.length && !state.draft) {
     const empty = document.createElement("li");
     empty.className = "muted";
-    empty.textContent = "No active sessions";
+    empty.textContent = q ? "No matching sessions" : "No active sessions";
     ul.appendChild(empty);
   }
   for (const s of live) {
@@ -355,11 +398,18 @@ function renderSessions() {
   const closedUl = $("closed");
   const closedHead = $("closed-head");
   closedUl.innerHTML = "";
-  const showClosed = closed.length > 0;
+  closedHead.textContent = q ? "Results" : "Closed";
+  const showClosed = closedSrc.length > 0 || Boolean(q);
   closedHead.hidden = !showClosed;
   closedUl.hidden = !showClosed;
-  for (const s of closed) {
-    closedUl.appendChild(sessionRow(s, () => peekHistory(s)));
+  if (q && !closedSrc.length) {
+    const empty = document.createElement("li");
+    empty.className = "muted";
+    empty.textContent = state.searchHits === null && q.length >= 2 ? "Searching…" : "No matches";
+    closedUl.appendChild(empty);
+  }
+  for (const s of closedSrc) {
+    closedUl.appendChild(sessionRow(s, () => peekHistory(s), () => hideClosed(s)));
   }
   $("btn-menu").classList.toggle("ping", Boolean(state.pingSid));
 }
@@ -373,6 +423,71 @@ async function loadSessions() {
   } catch (err) {
     $("health").textContent = String(err.message || err);
   }
+}
+
+async function hideClosed(item) {
+  if (!item?.native_id || !item.agent) return;
+  try {
+    await api("/api/history/hide", {
+      method: "POST",
+      body: JSON.stringify({ agent: item.agent, native: item.native_id }),
+    });
+    const key = nativePair(item);
+    state.history = (state.history || []).filter((s) => nativePair(s) !== key);
+    if (state.searchHits) {
+      state.searchHits = state.searchHits.filter((s) => nativePair(s) !== key);
+    }
+    const cur = state.session;
+    const curNative = cur?.native_id || cur?.cli_session || cur?.oc_id || "";
+    if (cur && !cur.live && cur.agent === item.agent && curNative === item.native_id) {
+      clearMain();
+    } else {
+      renderSessions();
+    }
+  } catch (err) {
+    setStatus(err.message || String(err));
+  }
+}
+
+function clearSearch() {
+  state.query = "";
+  state.searchHits = null;
+  state.searchGen += 1;
+  renderSessions();
+}
+
+let searchTimer = 0;
+async function runSearch(q, gen) {
+  if (q.length < 2) {
+    if (gen === state.searchGen) {
+      state.searchHits = null;
+      renderSessions();
+    }
+    return;
+  }
+  try {
+    const { hits } = await api("/api/history/search?q=" + encodeURIComponent(q));
+    if (gen !== state.searchGen) return;
+    state.searchHits = hits || [];
+    renderSessions();
+  } catch (err) {
+    if (gen !== state.searchGen) return;
+    setStatus(err.message || String(err));
+  }
+}
+
+function onSearchInput() {
+  const q = ($("search").value || "").trim();
+  state.query = q;
+  state.searchHits = null;
+  if (!q) {
+    clearSearch();
+    return;
+  }
+  renderSessions();
+  const gen = ++state.searchGen;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => runSearch(q, gen), 280);
 }
 
 async function loadProjects() {
@@ -1040,7 +1155,9 @@ function onHash() {
   }
   if (id.startsWith("h:")) {
     if (state.session?.id === id) return;
-    const item = (state.history || []).find((s) => s.id === id);
+    const item =
+      (state.history || []).find((s) => s.id === id) ||
+      (state.searchHits || []).find((s) => s.id === id);
     if (item) peekHistory(item);
     return;
   }
@@ -1057,6 +1174,15 @@ $("model").addEventListener("change", savePrefs);
 $("effort").addEventListener("change", savePrefs);
 $("fast").addEventListener("change", savePrefs);
 $("btn-new").addEventListener("click", openDraft);
+$("search").addEventListener("input", onSearchInput);
+$("search").addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("search").value) {
+    e.preventDefault();
+    e.stopPropagation();
+    $("search").value = "";
+    clearSearch();
+  }
+});
 $("btn-menu").addEventListener("click", () => {
   setMenuOpen(!document.body.classList.contains("menu-open"));
 });

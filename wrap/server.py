@@ -64,6 +64,7 @@ EFFORT_LEVELS = [
 
 _lock = threading.RLock()
 SESSIONS: dict[str, dict[str, Any]] = {}
+HIDDEN: set[str] = set()
 _catalog_lock = threading.Lock()
 _catalog_cache: dict[str, Any] = {"at": 0.0, "data": None}
 _send_q: dict[str, Queue[str | None]] = {}
@@ -135,22 +136,40 @@ def push_alert(title: str, body: str, sid: str = "") -> dict[str, Any]:
 
 
 def install_cmux_shim() -> None:
-    """Point /usr/local/bin/cmux at wrap's shim so wrap tmux skips cmux-bridge."""
-    shim = (ROOT / "bin" / "cmux").resolve()
+    """Copy wrap's cmux onto /usr/local/bin so wrap sessions skip the host bridge.
+
+    The wrap tree is often a read-only bind mount, so we cannot chmod/symlink
+    the source. Cursor also sanitizes PATH and drops WRAP_SESSION_ID — hooks
+    must hit this installed binary, which detects wrap via the TMUX socket.
+    """
+    shim_src = ROOT / "bin" / "cmux"
     dest = Path("/usr/local/bin/cmux")
     backup = Path("/usr/local/bin/cmux.agents-host")
-    if not shim.is_file():
+    if not shim_src.is_file():
         return
+    marker = b"wrap tmux sessions alert the browser"
     try:
-        os.chmod(shim, 0o755)
-        if dest.is_symlink() and dest.resolve() == shim:
-            return
-        if dest.exists() and not backup.exists():
-            dest.replace(backup)
-        elif dest.exists() or dest.is_symlink():
-            dest.unlink()
-        dest.symlink_to(shim)
-        log(f"cmux shim → wrap alerts ({shim})")
+        src = shim_src.read_bytes()
+        if dest.is_file() and not dest.is_symlink():
+            try:
+                if dest.read_bytes() == src:
+                    return
+            except OSError:
+                pass
+        if dest.exists() or dest.is_symlink():
+            current = b""
+            if dest.is_file() and not dest.is_symlink():
+                try:
+                    current = dest.read_bytes()
+                except OSError:
+                    current = b""
+            if marker not in current and not backup.exists():
+                dest.replace(backup)
+            else:
+                dest.unlink()
+        dest.write_bytes(src)
+        dest.chmod(0o755)
+        log(f"cmux shim → wrap alerts ({dest})")
     except OSError as exc:
         log(f"cmux shim skip: {exc}")
 
@@ -431,7 +450,7 @@ def tmux_alive_command(name: str) -> str:
 def persist_state() -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        payload = {"sessions": list(SESSIONS.values())}
+        payload = {"sessions": list(SESSIONS.values()), "hidden": sorted(HIDDEN)}
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     tmp.replace(STATE_PATH)
@@ -444,10 +463,18 @@ def load_state() -> None:
         data = json.loads(STATE_PATH.read_text())
     except (OSError, json.JSONDecodeError):
         return
-    items = data.get("sessions") if isinstance(data, dict) else None
-    if not isinstance(items, list):
+    if not isinstance(data, dict):
         return
+    items = data.get("sessions")
+    hidden = data.get("hidden")
     with _lock:
+        HIDDEN.clear()
+        if isinstance(hidden, list):
+            for key in hidden:
+                if isinstance(key, str) and ":" in key:
+                    HIDDEN.add(key)
+        if not isinstance(items, list):
+            return
         for sess in items:
             if not isinstance(sess, dict) or not sess.get("id"):
                 continue
@@ -489,7 +516,7 @@ def apply_native_title(
     """Replace wrap's placeholder title with the name the agent assigned."""
     native = ""
     if sess.get("agent") == "opencode" and sess.get("oc_id"):
-        native = oc.session_title(str(sess["oc_id"]), sess.get("cwd") or "")
+        native = oc.inferred_title(str(sess["oc_id"]), sess.get("cwd") or "")
     elif sess.get("tmux") and tmux_has(str(sess["tmux"])):
         pane_title = tmux_pane_title(str(sess["tmux"]))
         if pane_title and not tr.is_wrap_default_title(pane_title):
@@ -1117,8 +1144,34 @@ def find_live_native(agent: str, native_id: str, cwd: Path) -> dict[str, Any] | 
     return None
 
 
-def list_history() -> list[dict[str, Any]]:
-    projects = [Path(p["path"]) for p in list_projects()]
+def hide_key(agent: str, native_id: str) -> str:
+    return f"{agent}:{native_id}"
+
+
+def history_hidden() -> set[tuple[str, str]]:
+    with _lock:
+        keys = list(HIDDEN)
+    out: set[tuple[str, str]] = set()
+    for key in keys:
+        if ":" not in key:
+            continue
+        agent, native = key.split(":", 1)
+        if agent and native:
+            out.add((agent, native))
+    return out
+
+
+def hide_history(agent: str, native_id: str) -> None:
+    agent = (agent or "").strip()
+    native_id = (native_id or "").strip()
+    if agent not in AGENTS or not native_id:
+        raise ValueError("agent and native required")
+    with _lock:
+        HIDDEN.add(hide_key(agent, native_id))
+    persist_state()
+
+
+def live_native_skip() -> tuple[set[tuple[str, str]], set[str]]:
     skip: set[tuple[str, str]] = set()
     with _lock:
         vals = list(SESSIONS.values())
@@ -1132,6 +1185,15 @@ def list_history() -> list[dict[str, Any]]:
         if key[1]:
             skip.add(key)
     oc_skip = {key[1] for key in skip if key[0] == "opencode"}
+    return skip, oc_skip
+
+
+def list_history() -> list[dict[str, Any]]:
+    projects = [Path(p["path"]) for p in list_projects()]
+    skip, oc_skip = live_native_skip()
+    hidden = history_hidden()
+    skip |= hidden
+    oc_skip |= {n for a, n in hidden if a == "opencode"}
     cli = tr.list_native_history(
         projects,
         claude_home=CLAUDE_HOME,
@@ -1146,6 +1208,98 @@ def list_history() -> list[dict[str, Any]]:
     merged = cli + oc_rows
     merged.sort(key=lambda item: float(item.get("updated") or 0), reverse=True)
     return merged[:80]
+
+
+def _history_blob(item: dict[str, Any]) -> str:
+    cwd = str(item.get("cwd") or "")
+    name = Path(cwd).name if cwd else ""
+    return " ".join(
+        [
+            str(item.get("title") or ""),
+            cwd,
+            name,
+            str(item.get("agent") or ""),
+            str(item.get("native_id") or ""),
+        ]
+    ).lower()
+
+
+def _fill_history_title(item: dict[str, Any]) -> None:
+    if item.get("title") or str(item.get("agent") or "") == "opencode":
+        return
+    path = Path(item["transcript"]) if item.get("transcript") else None
+    named = tr.native_session_title(
+        str(item.get("agent") or ""),
+        transcript=path,
+        cli_session=str(item.get("native_id") or "") if item.get("agent") == "claude" else "",
+        claude_home=CLAUDE_HOME,
+        cursor_home=CURSOR_HOME,
+    )
+    if named:
+        item["title"] = named
+
+
+def search_history(query: str, limit: int = 40) -> list[dict[str, Any]]:
+    q = " ".join((query or "").lower().split())
+    if len(q) < 2:
+        return []
+    projects = [Path(p["path"]) for p in list_projects()]
+    skip, oc_skip = live_native_skip()
+    hidden = history_hidden()
+    skip |= hidden
+    oc_skip |= {n for a, n in hidden if a == "opencode"}
+    cli = tr.list_native_history(
+        projects,
+        claude_home=CLAUDE_HOME,
+        cursor_home=CURSOR_HOME,
+        host_projects=HOST_PROJECTS,
+        skip=skip,
+        limit=2000,
+        titles=False,
+    )
+    try:
+        oc_rows = oc.history_rows(projects, skip=oc_skip, limit=2000)
+    except RuntimeError:
+        oc_rows = []
+    merged = cli + oc_rows
+    merged.sort(key=lambda item: float(item.get("updated") or 0), reverse=True)
+    registry = tr.claude_registry_names(CLAUDE_HOME)
+    for item in merged:
+        if item.get("title") or str(item.get("agent") or "") != "claude":
+            continue
+        named = (registry.get(str(item.get("native_id") or "")) or {}).get("name") or ""
+        if named and not tr.is_wrap_default_title(named):
+            item["title"] = named
+    hits: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for item in merged:
+        if q in _history_blob(item):
+            row = dict(item)
+            row["snippet"] = ""
+            hits.append(row)
+            if len(hits) >= limit:
+                break
+        else:
+            rest.append(item)
+    deadline = time.time() + 3.0
+    if len(hits) < limit:
+        for item in rest:
+            if time.time() > deadline:
+                break
+            path = item.get("transcript")
+            if not path:
+                continue
+            found, snippet = tr.scan_transcript(Path(path), q)
+            if not found:
+                continue
+            row = dict(item)
+            row["snippet"] = snippet
+            hits.append(row)
+            if len(hits) >= limit:
+                break
+    for row in hits:
+        _fill_history_title(row)
+    return hits
 
 
 def history_transcript(agent: str, cwd: Path, native_id: str) -> Path | None:
@@ -1172,7 +1326,7 @@ def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
     title = ""
     if agent == "opencode":
         messages = oc.list_messages(native_id, cwd)
-        title = oc.session_title(native_id, cwd)
+        title = oc.inferred_title(native_id, cwd)
     else:
         path = history_transcript(agent, cwd, native_id)
         if not path:
@@ -1238,7 +1392,7 @@ def open_session(
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     if agent == "opencode":
-        oc_id = resume_id or oc.create_session(cwd, user_title or cwd.name)
+        oc_id = resume_id or oc.create_session(cwd, user_title)
         sess = {
             "id": sid,
             "agent": "opencode",
@@ -1452,6 +1606,10 @@ class Handler(BaseHTTPRequestHandler):
                     {"sessions": list_sessions(cwd, agent), "history": list_history()}
                 )
                 return self._send(st, raw, ct)
+            if path == "/api/history/search":
+                q = str((qs.get("q") or [""])[0] or "")
+                st, raw, ct = json_bytes({"hits": search_history(q)})
+                return self._send(st, raw, ct)
             if path == "/api/history":
                 agent = str((qs.get("agent") or [""])[0] or "")
                 native = str((qs.get("native") or [""])[0] or "")
@@ -1518,6 +1676,10 @@ class Handler(BaseHTTPRequestHandler):
                     str(data.get("sid") or ""),
                 )
                 st, raw, ct = json_bytes({"ok": True, **item})
+                return self._send(st, raw, ct)
+            if path == "/api/history/hide":
+                hide_history(str(data.get("agent") or ""), str(data.get("native") or ""))
+                st, raw, ct = json_bytes({"ok": True})
                 return self._send(st, raw, ct)
             if path == "/api/sessions":
                 attach = str(data.get("id") or "")

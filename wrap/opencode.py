@@ -158,8 +158,32 @@ def _session_id(payload: Any) -> str:
     return str(sid or "")
 
 
+PLACEHOLDER_TITLE_RE = re.compile(r"^New session(\s+-|$)", re.I)
+
+
+def is_placeholder_title(title: str, cwd: Path | str = "") -> bool:
+    t = (title or "").strip()
+    if not t or tr.is_wrap_default_title(t) or PLACEHOLDER_TITLE_RE.match(t):
+        return True
+    proj = Path(str(cwd)).name if cwd else ""
+    return bool(proj) and t == proj
+
+
+def display_title(row: dict[str, Any], cwd: Path | str = "") -> str:
+    """OpenCode's real name, else the generated slug — never the project folder."""
+    directory = str(row.get("directory") or cwd or "")
+    title = str(row.get("title") or "").strip()
+    if title and not is_placeholder_title(title, directory):
+        return title
+    return str(row.get("slug") or "").strip()
+
+
 def create_session(cwd: Path, title: str) -> str:
-    created = request("POST", "/session", cwd, {"title": title or cwd.name})
+    body: dict[str, Any] = {}
+    t = (title or "").strip()
+    if t:
+        body["title"] = t
+    created = request("POST", "/session", cwd, body)
     sid = _session_id(created)
     if sid:
         return sid
@@ -181,8 +205,32 @@ def session_title(oc_id: str, cwd: Path | str) -> str:
         info = get_session(oc_id, cwd)
     except RuntimeError:
         return ""
-    title = str(info.get("title") or "").strip()
-    return "" if not title or tr.is_wrap_default_title(title) else title
+    return display_title(info, cwd)
+
+
+def inferred_title(oc_id: str, cwd: Path | str) -> str:
+    """Prefer OpenCode's generated title, then first user line, then slug."""
+    if not oc_id:
+        return ""
+    try:
+        info = get_session(oc_id, cwd)
+    except RuntimeError:
+        info = {}
+    named = display_title(info, cwd)
+    slug = str((info or {}).get("slug") or "").strip()
+    if named and named != slug:
+        return named
+    for msg in list_messages(oc_id, cwd, limit=30):
+        if msg.get("role") != "user":
+            continue
+        text = str(msg.get("text") or "").strip()
+        if not text:
+            continue
+        line = text.split("\n")[0].strip()
+        if len(line) > 72:
+            line = line[:69].rstrip() + "…"
+        return line
+    return named or slug
 
 
 def list_sessions(cwd: Path | str) -> list[dict[str, Any]]:
@@ -207,6 +255,7 @@ def list_sessions(cwd: Path | str) -> list[dict[str, Any]]:
                 "id": sid,
                 "directory": directory,
                 "title": str(row.get("title") or "").strip(),
+                "slug": str(row.get("slug") or "").strip(),
                 "updated": updated,
                 "parentID": str(row.get("parentID") or ""),
             }
@@ -611,21 +660,23 @@ def providers(cwd: Path | str | None = None) -> list[dict[str, str]]:
 def history_rows(projects: list[Path], skip: set[str], limit: int = 80) -> list[dict[str, Any]]:
     ensure_serve()
     rows: list[tuple[float, dict[str, Any]]] = []
+    seen: set[str] = set()
     for cwd in projects:
         if not cwd.is_dir():
             continue
         for oc in list_sessions(cwd):
             sid = oc["id"]
-            if not sid or sid in skip or oc.get("parentID"):
+            if not sid or sid in skip or sid in seen or oc.get("parentID"):
                 continue
+            seen.add(sid)
             directory = oc["directory"] or str(cwd)
             try:
                 d = Path(directory).resolve()
             except OSError:
                 continue
-            title = oc["title"]
-            if title and tr.is_wrap_default_title(title):
-                title = ""
+            title = display_title(oc, directory)
+            if not title or title == str(oc.get("slug") or ""):
+                title = inferred_title(sid, d) or title
             rows.append(
                 (
                     oc["updated"],

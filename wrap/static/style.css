@@ -59,6 +59,25 @@ h2 {
 }
 .ghost.tiny { padding: 2px 8px; font-size: 11px; }
 
+#search {
+  width: 100%;
+  background: var(--bg-3);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+#search::placeholder { color: var(--muted); }
+#search:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
 #sessions, #closed {
   list-style: none; margin: 0; padding: 0;
 }
@@ -67,16 +86,16 @@ h2 {
   display: flex; flex-direction: column; gap: 4px;
 }
 #closed-head[hidden], #closed[hidden] { display: none !important; }
-#sessions li button, #closed li button, #sessions .muted, #closed .muted {
+#sessions li button, #closed li .sess-open, #sessions .muted, #closed .muted {
   width: 100%; text-align: left; background: transparent; border: 0;
   color: var(--ink); padding: 8px 10px; border-radius: 8px; cursor: pointer;
   font: inherit; font-size: 13px;
 }
-#sessions li button, #closed li button {
+#sessions li button, #closed li .sess-open {
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
 }
 #sessions li button:hover, #sessions li.on button,
-#closed li button:hover, #closed li.on button { background: var(--bg-3); }
+#closed li .sess-open:hover, #closed li.on .sess-open { background: var(--bg-3); }
 #sessions .muted, #closed .muted { color: var(--muted); cursor: default; font-size: 12px; }
 #sessions .sess-title, #closed .sess-title {
   font-size: 13px;
@@ -87,6 +106,44 @@ h2 {
 }
 #sessions .sess-meta, #closed .sess-meta { color: var(--muted); font-size: 11px; }
 #sessions .sess-meta .busy { color: var(--accent-2); }
+#closed .sess-snip {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  opacity: 0.85;
+}
+#closed li.has-drop {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+#closed li.has-drop .sess-open {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+#closed li .sess-drop {
+  flex: 0 0 28px;
+  width: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  border-radius: 8px;
+  cursor: pointer;
+  opacity: 0.5;
+}
+#closed li .sess-drop:hover {
+  color: var(--danger);
+  background: var(--bg-3);
+  opacity: 1;
+}
 #sessions li.draft button { border: 1px dashed var(--line); }
 #sessions li.ping button {
   animation: wrap-ping 0.55s ease 0s 3;
@@ -384,7 +441,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   #session-bar select { min-width: 0; flex: 1; width: 100%; }
   .log { padding: 14px 14px 10px; -webkit-overflow-scrolling: touch; }
   #lists { -webkit-overflow-scrolling: touch; }
-  #session-bar select, #input { font-size: 16px; }
+  #session-bar select, #input, #search { font-size: 16px; }
   #choice { margin: 0 14px 8px; }
   #composer {
     padding: 10px 14px max(12px, env(safe-area-inset-bottom));

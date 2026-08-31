@@ -672,6 +672,75 @@ def native_session_title(
     return None
 
 
+def _snippet_around(text: str, query: str, max_snippet: int) -> str:
+    low = text.lower()
+    i = low.find(query)
+    if i < 0:
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:max_snippet]
+    start = max(0, i - 40)
+    end = min(len(text), i + len(query) + 80)
+    chunk = re.sub(r"\s+", " ", text[start:end]).strip()
+    if start:
+        chunk = "…" + chunk
+    if end < len(text):
+        chunk += "…"
+    return chunk[:max_snippet]
+
+
+def _record_search_text(rec: dict[str, Any]) -> str:
+    msg = rec.get("message") if isinstance(rec.get("message"), dict) else rec
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, str):
+        return extract_user_query(content) or content
+    if isinstance(content, list):
+        bits: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                t = str(block.get("text") or "")
+                bits.append(extract_user_query(t) or t)
+        return "\n".join(bits)
+    text = rec.get("text") if isinstance(rec.get("text"), str) else ""
+    return text or ""
+
+
+def scan_transcript(path: Path, query: str, max_snippet: int = 140) -> tuple[bool, str]:
+    """Case-insensitive scan of a JSONL transcript. Returns (hit, snippet)."""
+    q = (query or "").lower()
+    if len(q) < 2 or not path.is_file():
+        return False, ""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                low = line.lower()
+                if q not in low:
+                    continue
+                snippet = ""
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    rec = None
+                if isinstance(rec, dict):
+                    blob = _record_search_text(rec)
+                    if blob and q in blob.lower():
+                        snippet = _snippet_around(blob, q, max_snippet)
+                if not snippet:
+                    i = low.find(q)
+                    start = max(0, i - 48)
+                    end = min(len(line), i + len(q) + 96)
+                    chunk = re.sub(r"\\[ntr]|[{}\[\]\"]", " ", line[start:end])
+                    snippet = re.sub(r"\s+", " ", chunk).strip()
+                    if start:
+                        snippet = "…" + snippet
+                    if end < len(line):
+                        snippet += "…"
+                    snippet = snippet[:max_snippet]
+                return True, snippet
+    except OSError:
+        return False, ""
+    return False, ""
+
+
 def list_native_history(
     projects: list[Path],
     *,
@@ -680,6 +749,7 @@ def list_native_history(
     host_projects: Path,
     skip: set[tuple[str, str]] | None = None,
     limit: int = 80,
+    titles: bool = True,
 ) -> list[dict[str, Any]]:
     """Closed CLI sessions from native stores (no wrap DB). OpenCode history is listed via HTTP."""
     skip = skip or set()
@@ -692,7 +762,7 @@ def list_native_history(
             return
         rows.append((mtime, item))
 
-    registry = claude_registry_names(claude_home)
+    registry = claude_registry_names(claude_home) if titles else {}
     for cwd in projects:
         if not cwd.is_dir():
             continue
@@ -720,18 +790,19 @@ def list_native_history(
     out: list[dict[str, Any]] = []
     for mtime, item in rows[:limit]:
         path = Path(item["transcript"]) if item.get("transcript") else None
-        named = native_session_title(
-            str(item["agent"]),
-            transcript=path,
-            cli_session=str(item["native_id"] or "") if item["agent"] == "claude" else "",
-            claude_home=claude_home,
-            cursor_home=cursor_home,
-            registry=registry,
-        )
-        if named:
-            item["title"] = named
-        elif item.get("title") and is_wrap_default_title(str(item["title"])):
-            item["title"] = ""
+        if titles:
+            named = native_session_title(
+                str(item["agent"]),
+                transcript=path,
+                cli_session=str(item["native_id"] or "") if item["agent"] == "claude" else "",
+                claude_home=claude_home,
+                cursor_home=cursor_home,
+                registry=registry,
+            )
+            if named:
+                item["title"] = named
+            elif item.get("title") and is_wrap_default_title(str(item["title"])):
+                item["title"] = ""
         item["id"] = f"h:{item['agent']}:{item['native_id']}"
         item["updated"] = mtime
         item["live"] = False

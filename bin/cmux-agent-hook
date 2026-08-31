@@ -3,8 +3,9 @@
 # Usage: cmux-agent-hook <claude|cursor> <event>
 # Reads agent hook JSON from stdin.
 #
-# Always `cmux notify` — bridge delivers OSC to the registered host TTY + afplay.
-# (cmux `hooks … stop` alone only updates sidebar state, no desktop alert.)
+# Always `cmux notify` — wrap sessions go to the browser; others hit the host
+# bridge (OSC + afplay). Cursor sanitizes PATH and drops WRAP_SESSION_ID, so
+# we detect wrap via the tmux socket (or WRAP_SESSION_ID when present).
 # Cursor: wire only the `stop` event (not afterAgentResponse) — both fire per turn.
 set -euo pipefail
 
@@ -62,6 +63,14 @@ print(f"body={shlex.quote(body)}")
 
 title="${title:-${agent}}"
 body="${body:-$event}"
+
+wrap_cmux="/usr/local/share/wrap/bin/cmux"
+if [[ -n "${WRAP_SESSION_ID:-}" || "${TMUX:-}" == *wrap.tmux* ]]; then
+  if [[ -f "$wrap_cmux" ]]; then
+    python3 "$wrap_cmux" notify --title "$title" --body "$body" >/dev/null 2>&1 || true
+    exit 0
+  fi
+fi
 
 cmux notify --title "$title" --body "$body" >/dev/null 2>&1 || true
 exit 0
