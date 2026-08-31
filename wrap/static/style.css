@@ -280,6 +280,39 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .msg pre {
   background: #0e0f0b; padding: 10px; border-radius: 8px; overflow: auto;
 }
+.msg .code-block {
+  position: relative;
+  margin: 8px 0;
+}
+.msg .code-block pre {
+  margin: 0;
+  padding-right: 4.75em;
+}
+.msg .code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  background: var(--bg-3);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.msg .code-copy:hover {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+.msg .code-copy.copied {
+  color: #1a160c;
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
 .empty { color: var(--muted); margin: auto; font-family: var(--font); font-size: 20px; }
 .busy-dot {
   width: 8px; height: 8px; border-radius: 50%; background: var(--accent-2);
@@ -447,5 +480,10 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
     padding: 10px 14px max(12px, env(safe-area-inset-bottom));
   }
   .msg { max-width: 100%; }
+  .msg .code-copy {
+    padding: 6px 10px;
+    font-size: 12px;
+    min-height: 32px;
+  }
   .empty { font-size: 16px; padding: 0 16px; text-align: center; }
 }

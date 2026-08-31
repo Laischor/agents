@@ -33,9 +33,52 @@ function escapeHtml(s) {
 function renderMarkdown(text) {
   const escaped = escapeHtml(text || "");
   const withCode = escaped.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, _lang, body) => {
-    return `<pre><code>${body}</code></pre>`;
+    return `<div class="code-block"><button type="button" class="code-copy" aria-label="Copy code">Copy</button><pre><code>${body}</code></pre></div>`;
   });
   return withCode.replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      if (document.execCommand("copy")) resolve();
+      else reject(new Error("copy failed"));
+    } catch (err) {
+      reject(err);
+    } finally {
+      ta.remove();
+    }
+  });
+}
+
+function onCodeCopy(btn) {
+  const text = btn.closest(".code-block")?.querySelector("code")?.textContent ?? "";
+  const reset = () => {
+    btn.textContent = "Copy";
+    btn.classList.remove("copied");
+  };
+  copyText(text)
+    .then(() => {
+      btn.textContent = "Copied";
+      btn.classList.add("copied");
+      clearTimeout(btn._copyTimer);
+      btn._copyTimer = setTimeout(reset, 1600);
+    })
+    .catch(() => {
+      btn.textContent = "Failed";
+      clearTimeout(btn._copyTimer);
+      btn._copyTimer = setTimeout(reset, 1600);
+    });
 }
 
 function renderDiff(text) {
@@ -1242,6 +1285,12 @@ function onHash() {
   if (!id && (state.session || state.draft)) clearMain();
 }
 
+$("log").addEventListener("click", (e) => {
+  const btn = e.target.closest(".code-copy");
+  if (!btn) return;
+  e.preventDefault();
+  onCodeCopy(btn);
+});
 $("agent").addEventListener("change", () => setAgent($("agent").value));
 $("project").addEventListener("change", () => setProject($("project").value));
 $("model").addEventListener("change", savePrefs);
