@@ -399,7 +399,10 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   display: flex; flex-direction: column; gap: 8px;
 }
 #input {
-  width: 100%; resize: vertical; min-height: 52px;
+  width: 100%; resize: none; min-height: 52px;
+  max-height: min(40vh, 320px);
+  overflow-y: auto;
+  line-height: 1.45;
   background: var(--bg-2); color: var(--ink); border: 1px solid var(--line);
   border-radius: 10px; padding: 10px 12px; font: inherit;
 }
@@ -479,6 +482,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   #composer {
     padding: 10px 14px max(12px, env(safe-area-inset-bottom));
   }
+  #input { max-height: min(30vh, 220px); }
   .msg { max-width: 100%; }
   .msg .code-copy {
     padding: 6px 10px;

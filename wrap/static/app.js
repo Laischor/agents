@@ -19,6 +19,8 @@ const state = {
   searchGen: 0,
   projects: [],
   pending: {},
+  sending: false,
+  spawning: false,
 };
 
 const prefsKey = (agent) => `wrap.prefs.${agent}`;
@@ -224,6 +226,7 @@ function setHash() {
 }
 
 function canCompose() {
+  if (state.sending || state.spawning) return false;
   if (state.session) return true;
   return state.draft && Boolean(state.cwd) && Boolean(state.agent);
 }
@@ -838,6 +841,8 @@ async function attachSession(id) {
 }
 
 async function spawnSession(cfg) {
+  if (state.spawning) return null;
+  state.spawning = true;
   savePrefs();
   setStatus("");
   $("btn-send").disabled = true;
@@ -860,6 +865,8 @@ async function spawnSession(cfg) {
     setStatus(err.message || String(err));
     applyChrome();
     return null;
+  } finally {
+    state.spawning = false;
   }
 }
 
@@ -1019,40 +1026,48 @@ function mergeMessages(serverMsgs) {
 
 async function sendMessage(ev) {
   ev.preventDefault();
+  if (state.sending || state.spawning) return;
   const typed = $("input").value.trim();
   const attached = (state.attachments || []).slice();
   const bits = attached.map((a) => a.path);
   if (typed) bits.push(typed);
   const text = bits.join("\n\n");
   if (!text) return;
-  if (!state.session) {
-    const sess = await startSession();
-    if (!sess) return;
-  } else if (!state.session.live) {
-    const sess = await wakeClosed(state.session);
-    if (!sess) return;
-  }
-  $("input").value = "";
-  clearAttachments();
-  const sid = state.session.id;
-  if (!state.pending[sid]) state.pending[sid] = [];
-  state.pending[sid].push({ id: "p-" + Date.now(), text });
-  renderMessages(mergeMessages(state.session.messages || []));
+  state.sending = true;
   $("btn-send").disabled = true;
   try {
-    await api(`/api/sessions/${sid}/send`, {
-      method: "POST",
-      body: JSON.stringify({ text }),
-    });
-  } catch (err) {
-    state.pending[sid] = (state.pending[sid] || []).filter((p) => p.text !== text);
-    $("input").value = typed;
-    state.attachments = attached;
-    renderAttach();
-    setStatus(err.message || String(err));
+    if (!state.session) {
+      const sess = await startSession();
+      if (!sess) return;
+    } else if (!state.session.live) {
+      const sess = await wakeClosed(state.session);
+      if (!sess) return;
+    }
+    $("input").value = "";
+    fitInput();
+    clearAttachments();
+    const sid = state.session.id;
+    if (!state.pending[sid]) state.pending[sid] = [];
+    state.pending[sid].push({ id: "p-" + Date.now(), text });
     renderMessages(mergeMessages(state.session.messages || []));
+    try {
+      await api(`/api/sessions/${sid}/send`, {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      });
+    } catch (err) {
+      state.pending[sid] = (state.pending[sid] || []).filter((p) => p.text !== text);
+      $("input").value = typed;
+      fitInput();
+      state.attachments = attached;
+      renderAttach();
+      setStatus(err.message || String(err));
+      renderMessages(mergeMessages(state.session.messages || []));
+    }
   } finally {
+    state.sending = false;
     $("btn-send").disabled = !canCompose() || state.paneOpen;
+    $("input").disabled = !canCompose() || state.paneOpen;
     if (!state.paneOpen) $("input").focus();
   }
 }
@@ -1313,10 +1328,19 @@ $("scrim").addEventListener("click", closeMenu);
 narrowMq.addEventListener("change", () => {
   if (!isNarrow()) closeMenu();
 });
+function fitInput() {
+  const el = $("input");
+  el.style.height = "0px";
+  el.style.height = el.scrollHeight + "px";
+}
+
 $("composer").addEventListener("submit", sendMessage);
+$("input").addEventListener("input", fitInput);
+window.addEventListener("resize", fitInput);
 $("input").addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && !ev.shiftKey) {
     ev.preventDefault();
+    if (state.sending || state.spawning || $("btn-send").disabled) return;
     $("composer").requestSubmit();
   }
 });
