@@ -224,6 +224,7 @@ function applyChrome() {
         : "Message the native CLI… paste a screenshot";
   $("btn-send").disabled = !canCompose() || state.paneOpen;
   $("btn-int").hidden = !running;
+  $("btn-clear").hidden = !(viewing && sess?.cwd && (sess?.agent || state.agent));
   $("btn-stop").hidden = !running;
   $("btn-pane").hidden = !(running && sess?.tmux);
   $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && running));
@@ -793,11 +794,7 @@ async function attachSession(id) {
   }
 }
 
-async function startSession() {
-  if (!state.cwd) {
-    setStatus("Pick a project first");
-    return null;
-  }
+async function spawnSession(cfg) {
   savePrefs();
   setStatus("");
   $("btn-send").disabled = true;
@@ -805,11 +802,11 @@ async function startSession() {
     const sess = await api("/api/sessions", {
       method: "POST",
       body: JSON.stringify({
-        agent: state.agent,
-        cwd: state.cwd,
-        model: $("model").value,
-        effort: $("effort").value,
-        fast: $("fast").checked,
+        agent: cfg.agent,
+        cwd: cfg.cwd,
+        model: cfg.model || "",
+        effort: cfg.effort || "",
+        fast: Boolean(cfg.fast),
       }),
     });
     renderSession(sess);
@@ -820,6 +817,83 @@ async function startSession() {
     setStatus(err.message || String(err));
     applyChrome();
     return null;
+  }
+}
+
+async function startSession() {
+  if (!state.cwd) {
+    setStatus("Pick a project first");
+    return null;
+  }
+  return spawnSession({
+    agent: state.agent,
+    cwd: state.cwd,
+    model: $("model").value,
+    effort: $("effort").value,
+    fast: $("fast").checked,
+  });
+}
+
+function sessionConfig(sess) {
+  return {
+    agent: sess.agent || state.agent,
+    cwd: sess.cwd || state.cwd,
+    model: sess.model || $("model").value || "",
+    effort: sess.effort || $("effort").value || "",
+    fast: Boolean(sess.fast),
+  };
+}
+
+async function clearSession() {
+  const sess = state.session;
+  if (!sess) return;
+  const cfg = sessionConfig(sess);
+  if (!cfg.cwd || !cfg.agent) {
+    setStatus("Pick a project first");
+    return;
+  }
+  const liveId = sess.live && sess.id && !String(sess.id).startsWith("h:") ? sess.id : "";
+  $("btn-clear").disabled = true;
+  $("btn-send").disabled = true;
+  try {
+    if (liveId) {
+      try {
+        await api(`/api/sessions/${liveId}`, { method: "DELETE" });
+      } catch (_) {
+        /* already gone */
+      }
+    }
+    if (state.es) {
+      state.es.close();
+      state.es = null;
+    }
+    state.session = null;
+    state.paneOpen = false;
+    clearAttachments();
+    state.agent = cfg.agent;
+    state.cwd = cfg.cwd;
+    fillProjects();
+    applyCatalog();
+    if ([...$("model").options].some((o) => o.value === (cfg.model || ""))) {
+      $("model").value = cfg.model || "";
+    }
+    if ([...$("effort").options].some((o) => o.value === (cfg.effort || ""))) {
+      $("effort").value = cfg.effort || "";
+    }
+    $("fast").checked = Boolean(cfg.fast);
+    const next = await spawnSession(cfg);
+    if (next) {
+      if (!state.paneOpen) $("input").focus();
+    } else {
+      state.draft = true;
+      applyChrome();
+      renderSessions();
+    }
+  } catch (err) {
+    setStatus(err.message || String(err));
+    applyChrome();
+  } finally {
+    $("btn-clear").disabled = false;
   }
 }
 
@@ -1204,6 +1278,9 @@ $("btn-int").addEventListener("click", async () => {
   } catch (err) {
     setStatus(err.message || String(err));
   }
+});
+$("btn-clear").addEventListener("click", () => {
+  clearSession();
 });
 $("btn-stop").addEventListener("click", async () => {
   if (!state.session) return;
