@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>wrap — native sessions</title>
-  <link rel="stylesheet" href="/static/style.css?v=23" />
+  <link rel="stylesheet" href="/static/style.css?v=25" />
 </head>
 <body>
   <div id="scrim" hidden></div>
@@ -64,15 +64,12 @@
       </div>
     </div>
     <p id="status" hidden></p>
-    <div id="choice" hidden></div>
     <form id="composer">
       <div id="attach" hidden></div>
       <textarea id="input" rows="2" placeholder="Message the native CLI…" disabled></textarea>
       <div class="row">
         <div class="actions">
           <button type="button" id="btn-pane" class="ghost" hidden>TUI</button>
-          <button type="button" id="btn-yes" class="ghost" hidden>Yes</button>
-          <button type="button" id="btn-no" class="ghost" hidden>No</button>
           <button type="button" id="btn-int" class="ghost" hidden>Interrupt</button>
           <button type="button" id="btn-clear" class="ghost" hidden title="Stop this session and start a new one with the same project, agent, and model">Clear</button>
           <button type="button" id="btn-stop" class="ghost danger" hidden>Stop</button>
@@ -81,6 +78,6 @@
       </div>
     </form>
   </main>
-  <script src="/static/app.js?v=23"></script>
+  <script src="/static/app.js?v=25"></script>
 </body>
 </html>

@@ -8,6 +8,7 @@ No extra model harness — Claude/Cursor stay on the live CLI; OpenCode uses
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -50,6 +51,33 @@ _ALERT_URGENT_RE = re.compile(
     r"permission|needs your permission|ask.?user|waiting for your permission",
     re.I,
 )
+PANE_PERM_RE = re.compile(
+    r"Do you want to proceed\?|"
+    r"Yes, and don.?t ask again|"
+    r"No, and tell Claude|"
+    r"Allow this (?:command|action|connection)|"
+    r"\(y/n\)\s*$",
+    re.I,
+)
+PANE_SELECT_RE = re.compile(
+    r"Use arrow keys to navigate, Enter to select|"
+    r"press the key shown|"
+    r"Applying your selection",
+    re.I,
+)
+# Cursor AskQuestion overlay (jsonl is only written after the answer).
+PANE_ASK_RE = re.compile(
+    r"Space select|"
+    r"Enter next/submit|"
+    r"Question \d+ of \d+|"
+    r"↑/↓ option",
+    re.I,
+)
+PANE_OPT_KEY_RE = re.compile(r"\[([A-Za-z0-9])\]\s+(\S.*)$")
+PANE_OPT_NUM_RE = re.compile(r"^[❯►>\s]*(\d+)\.\s+(\S.*)$")
+PANE_OPT_CHECK_RE = re.compile(r"^[❯►›>\s]*\[\s*[xX ]?\s*\]\s+(\S.*)$")
+PANE_OTHER_OPT_RE = re.compile(r"^Other:\s*\(", re.I)
+PANE_QNUM_RE = re.compile(r"^(\d+)\.\s+(\S.*)$")
 ALERT_SETTLE_SEC = 6.0
 ALERT_REPLAY_SEC = 45.0
 BUSY_HOLD_SEC = 2.5
@@ -501,19 +529,153 @@ def session_subagents(sess: dict[str, Any]) -> list[dict[str, Any]]:
     return tr.claude_subagents(path)
 
 
-def session_choice(sess: dict[str, Any]) -> dict[str, Any] | None:
+def _clean_pane_line(ln: str) -> str:
+    s = (ln or "").strip()
+    if s.startswith(("│", "|", "┃")):
+        s = s[1:]
+    if s.endswith(("│", "|", "┃")):
+        s = s[:-1]
+    return s.strip()
+
+
+def _pane_ask_choice(pane: str) -> dict[str, Any] | None:
+    """Cursor AskQuestion lives in a boxed overlay; options are `[ ] label`."""
+    in_box = False
+    cur: list[str] = []
+    blocks: list[list[str]] = []
+    for raw in (pane or "").splitlines():
+        st = raw.strip()
+        if st[:1] in "┌┏╭":
+            in_box = True
+            cur = []
+            continue
+        if st[:1] in "└┗╰":
+            if in_box and cur:
+                blocks.append(cur)
+            in_box = False
+            cur = []
+            continue
+        if in_box:
+            s = _clean_pane_line(raw)
+            if s:
+                cur.append(s)
+    if not blocks:
+        return None
+    tail = blocks[-1]
+    if not PANE_ASK_RE.search("\n".join(tail)):
+        return None
+    opts: list[dict[str, str]] = []
+    prompt = ""
+    title = ""
+    for s in tail:
+        if PANE_ASK_RE.search(s):
+            continue
+        m = PANE_OPT_CHECK_RE.match(s)
+        if m:
+            label = m.group(1).strip()[:80]
+            if PANE_OTHER_OPT_RE.match(label):
+                continue
+            if all(o["label"] != label for o in opts):
+                opts.append({"label": label, "key": str(len(opts) + 1)})
+            continue
+        mq = PANE_QNUM_RE.match(s)
+        if mq and not prompt:
+            prompt = mq.group(2).strip()[:200]
+            continue
+        if s.lower().startswith("question ") and " of " in s.lower():
+            continue
+        if not title and 3 < len(s) < 80:
+            title = s[:80]
+    if len(opts) < 2:
+        return None
+    prompt = prompt or title or "Needs a choice"
+    sig = f"{prompt}|{'|'.join(o['label'] for o in opts)}"
+    hid = hashlib.md5(sig.encode("utf-8")).hexdigest()[:10]
+    return {
+        "id": f"pane-ask:{hid}",
+        "kind": "question",
+        "drive": "checkbox",
+        "title": title or "Choose",
+        "questions": [{"prompt": prompt, "options": opts}],
+    }
+
+
+def pane_prompt_choice(pane: str) -> dict[str, Any] | None:
+    """Live TUI select/permission dialog — jsonl often lands only after the answer."""
+    blob = pane or ""
+    recent = "\n".join(blob.splitlines()[-40:])
+    last8 = "\n".join(blob.splitlines()[-8:])
+    is_ask = bool(PANE_ASK_RE.search(recent))
+    is_select = bool(PANE_SELECT_RE.search(recent))
+    is_perm = bool(PANE_PERM_RE.search(last8))
+    if is_ask:
+        asked = _pane_ask_choice(blob)
+        if asked:
+            return asked
+    if not (is_select or is_perm):
+        return None
+    lines = [_clean_pane_line(ln) for ln in blob.splitlines()]
+    tail = [ln for ln in lines if ln][-30:]
+    opts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    prompt = ""
+    for s in tail:
+        if not s or PANE_SELECT_RE.search(s) or PANE_ASK_RE.search(s):
+            continue
+        m = PANE_OPT_KEY_RE.search(s)
+        if m:
+            key, label = m.group(1).lower(), m.group(2).strip()[:80]
+            if key not in seen:
+                seen.add(key)
+                opts.append({"label": label or key, "key": key})
+            continue
+        m = PANE_OPT_NUM_RE.match(s)
+        if m:
+            key, label = m.group(1), m.group(2).strip()[:80]
+            if key not in seen:
+                seen.add(key)
+                opts.append({"label": label or key, "key": key})
+            continue
+        if PANE_PERM_RE.search(s):
+            cleaned = re.sub(r"^[❯►>]\s*", "", s).strip()
+            if cleaned and not prompt:
+                prompt = cleaned[:200]
+            continue
+        if not prompt and 12 < len(s) < 200 and not s.startswith("ctrl+"):
+            prompt = s[:200]
+    if len(opts) < 2:
+        opts = [{"label": "Yes", "key": "y"}, {"label": "No", "key": "n"}]
+    return {
+        "id": "pane-select",
+        "kind": "permission",
+        "drive": "key",
+        "title": "Choose",
+        "questions": [{"prompt": prompt or "Needs a choice", "options": opts}],
+    }
+
+
+def session_choice(sess: dict[str, Any], pane: str | None = None) -> dict[str, Any] | None:
     agent = str(sess.get("agent") or "")
     if agent == "opencode" and sess.get("oc_id"):
         return oc.pending_choice(str(sess["oc_id"]), sess.get("cwd") or "")
     if agent not in ("claude", "cursor"):
         return None
+    text = ""
+    if sess.get("tmux"):
+        text = pane if pane is not None else tmux_capture(str(sess["tmux"]))
+        live = pane_prompt_choice(text)
+        if live:
+            return live
+    # Cursor writes AskQuestion to jsonl only after the user already answered.
+    if agent == "cursor":
+        return None
     raw = sess.get("transcript")
     path = Path(raw) if raw else pick_transcript(sess)
-    if not path or not path.is_file():
-        return None
-    if sess.get("transcript") != str(path):
-        sess["transcript"] = str(path)
-    return tr.pending_choice(agent, path)
+    if path and path.is_file():
+        if sess.get("transcript") != str(path):
+            sess["transcript"] = str(path)
+        return tr.pending_choice(agent, path)
+    return None
 
 
 def send_choice_keys(name: str, picks: list[int]) -> None:
@@ -524,6 +686,23 @@ def send_choice_keys(name: str, picks: list[int]) -> None:
         tmux_send_keys(name, keys)
         if i < len(picks) - 1:
             time.sleep(0.15)
+
+
+def send_checkbox_choice_keys(name: str, picks: list[int]) -> None:
+    """Cursor AskQuestion: arrows, Space to check, ←/→ between questions, Enter to submit."""
+    for i, opt in enumerate(picks):
+        tmux_send_keys(name, ["Up"] * 12)
+        time.sleep(0.05)
+        if opt:
+            tmux_send_keys(name, ["Down"] * max(opt, 0))
+            time.sleep(0.05)
+        tmux_send_keys(name, ["Space"])
+        time.sleep(0.08)
+        if i < len(picks) - 1:
+            tmux_send_keys(name, ["Right"])
+            time.sleep(0.12)
+        else:
+            tmux_send_keys(name, ["Enter"])
 
 
 def apply_oc_choice(sess: dict[str, Any], choice: dict[str, Any], picks: list[int]) -> None:
@@ -1112,7 +1291,7 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
         sess["agent"] == "opencode" and bool(sess.get("oc_id"))
     )
     subagents = session_subagents(sess)
-    choice = session_choice(sess)
+    choice = session_choice(sess, pane)
     busy = session_is_working(sess, pane) or bool(subagents) or bool(choice)
     return {
         **session_meta(sess),
@@ -1603,7 +1782,8 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
         if not live:
             continue
         subagents = session_subagents(sess)
-        choice = session_choice(sess)
+        pane = tmux_capture(sess["tmux"]) if sess.get("tmux") else ""
+        choice = session_choice(sess, pane)
         pub = {
             **session_meta(sess),
             "busy": False,
@@ -1612,7 +1792,6 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
             "choice": choice,
         }
         if sess.get("tmux"):
-            pane = tmux_capture(sess["tmux"])
             pub["busy"] = session_is_working(sess, pane) or bool(subagents) or bool(choice)
         elif sess.get("agent") == "opencode" and sess.get("oc_id"):
             pub["busy"] = session_is_working(sess) or bool(subagents) or bool(choice)
@@ -1862,7 +2041,19 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     if not sess.get("tmux"):
                         raise RuntimeError("no tmux pane for this session")
-                    send_choice_keys(str(sess["tmux"]), idxs)
+                    drive = str(choice.get("drive") or "")
+                    cid = str(choice.get("id") or "")
+                    if drive == "checkbox" or cid.startswith("pane-ask:"):
+                        send_checkbox_choice_keys(str(sess["tmux"]), idxs)
+                    elif cid == "pane-select" or str(choice.get("kind") or "") == "permission":
+                        opt = (questions[0] or {}).get("options") or []
+                        picked = opt[idxs[0]] if idxs else {}
+                        key = str((picked or {}).get("key") or "")
+                        if not key:
+                            key = "y" if idxs[0] == 0 else "n"
+                        tmux_send_keys(str(sess["tmux"]), [key, "Enter"])
+                    else:
+                        send_choice_keys(str(sess["tmux"]), idxs)
                 st, raw, ct = json_bytes({"ok": True})
                 return self._send(st, raw, ct)
             self._send(404, b'{"error":"not found"}', "application/json")
@@ -2012,8 +2203,9 @@ class Handler(BaseHTTPRequestHandler):
                 fp = fingerprint(sess)
                 pane = tmux_capture(sess["tmux"]) if sess.get("tmux") else ""
                 subagents = session_subagents(sess)
-                busy = session_is_working(sess, pane) or bool(subagents)
-                pane_key = (pane, busy, tuple(s["id"] for s in subagents))
+                choice = session_choice(sess, pane)
+                busy = session_is_working(sess, pane) or bool(subagents) or bool(choice)
+                pane_key = (pane, busy, tuple(s["id"] for s in subagents), (choice or {}).get("id"))
                 if fp != last:
                     last = fp
                     payload = session_public(sess)
@@ -2024,13 +2216,19 @@ class Handler(BaseHTTPRequestHandler):
                         payload.get("pane"),
                         bool(payload.get("busy")),
                         tuple(s.get("id") for s in (payload.get("subagents") or [])),
+                        (payload.get("choice") or {}).get("id"),
                     )
                 elif pane_key != last_pane:
                     last_pane = pane_key
                     chunk = (
                         "event: pane\ndata: "
                         + json.dumps(
-                            {"pane": pane, "busy": busy, "subagents": subagents},
+                            {
+                                "pane": pane,
+                                "busy": busy,
+                                "subagents": subagents,
+                                "choice": choice,
+                            },
                             ensure_ascii=False,
                         )
                         + "\n\n"

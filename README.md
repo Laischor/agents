@@ -92,7 +92,7 @@ open http://127.0.0.1:3780
 agents wrap                 # print URL if already up
 ```
 
-TUI permission prompts: use **Yes** / **No** / **Interrupt**, or open the **TUI** pane. **Stop** kills that tmux process only. OpenCode sessions stay in `opencode.db` (Stop does not delete them).
+TUI permission prompts show **Yes** / **No** in the chat when they appear (or open the **TUI** pane). **Stop** kills that tmux process only. OpenCode sessions stay in `opencode.db` (Stop does not delete them).
 
 Set `AGENTS_WRAP_SERVE=0` in `.env` to skip auto-start. Recreate `agents` from the **host** after this change (`./start.sh`) so the image has `tmux` and the port mapping.
 

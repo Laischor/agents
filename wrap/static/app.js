@@ -258,7 +258,6 @@ function applyChrome() {
   const running = Boolean(sess?.live);
   const viewing = Boolean(sess);
   const draft = state.draft && !viewing;
-  const ocPerm = running && sess?.agent === "opencode" && sess?.choice?.kind === "permission";
   $("session-bar").hidden = !draft;
   $("input").disabled = !canCompose() || state.paneOpen;
   $("input").placeholder = draft
@@ -274,8 +273,6 @@ function applyChrome() {
   $("btn-stop").hidden = !running;
   $("btn-pane").hidden = !(running && sess?.tmux);
   $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && running));
-  $("btn-yes").hidden = !((running && sess?.tmux) || ocPerm);
-  $("btn-no").hidden = !((running && sess?.tmux) || ocPerm);
   if (running && sess?.tmux && state.paneOpen) {
     $("tui").hidden = false;
   } else {
@@ -596,7 +593,6 @@ function renderSession(sess) {
   applyCatalog();
   setStatus("");
   renderMessages(mergeMessages(sess.messages || []));
-  renderChoice(sess.choice);
   if (sess.tmux) {
     $("pane").textContent = sess.pane || "";
     if (state.paneOpen) {
@@ -615,11 +611,12 @@ function renderMessages(messages) {
   const log = $("log");
   log.innerHTML = "";
   const busy = Boolean(state.session?.busy);
+  const choice = state.session?.choice;
   const rows = messages.slice();
-  if (busy && (!rows.length || rows[rows.length - 1].role === "user")) {
+  if (busy && !choice && (!rows.length || rows[rows.length - 1].role === "user")) {
     rows.push({ id: "streaming", role: "assistant", parts: [], text: "" });
   }
-  if (!rows.length) {
+  if (!rows.length && !choice) {
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = !state.session?.live
@@ -637,7 +634,7 @@ function renderMessages(messages) {
     who.className = "who";
     if (m.pending) el.classList.add("pending");
     who.innerHTML =
-      (m.role === "assistant" && busy ? `<span class="busy-dot"></span>` : "") +
+      (m.role === "assistant" && busy && !choice ? `<span class="busy-dot"></span>` : "") +
       (m.pending ? "queued" : m.role);
     el.appendChild(who);
     const parts = messageParts(m);
@@ -665,6 +662,9 @@ function renderMessages(messages) {
     }
     flushTools();
     log.appendChild(el);
+  }
+  if (choice && choice.questions && choice.questions.length) {
+    log.appendChild(renderChoice(choice));
   }
   log.scrollTop = log.scrollHeight;
 }
@@ -717,21 +717,18 @@ function renderDiffBox(d) {
 }
 
 function renderChoice(choice) {
-  const el = $("choice");
-  if (!choice || !choice.questions || !choice.questions.length) {
-    el.hidden = true;
-    el.innerHTML = "";
-    return;
-  }
-  el.hidden = false;
-  el.innerHTML = "";
-  const title = document.createElement("div");
-  title.className = "choice-title";
-  title.textContent = choice.title || "Choose";
-  el.appendChild(title);
+  const el = document.createElement("article");
+  el.className = "msg assistant choice";
+  const who = document.createElement("div");
+  who.className = "who";
+  who.textContent = choice.title || "choose";
+  el.appendChild(who);
   const questions = choice.questions;
   const picks = questions.map(() => -1);
   const single = questions.length === 1 && !questions.some((q) => q.multi);
+  const compact =
+    questions.length === 1 &&
+    (questions[0].options || []).length <= 2;
   questions.forEach((q, qi) => {
     const box = document.createElement("div");
     box.className = "choice-q";
@@ -740,7 +737,7 @@ function renderChoice(choice) {
     prompt.textContent = [q.header, q.prompt].filter(Boolean).join(" — ") || "Question";
     box.appendChild(prompt);
     const opts = document.createElement("div");
-    opts.className = "choice-opts";
+    opts.className = "choice-opts" + (compact ? " row" : "");
     (q.options || []).forEach((opt, oi) => {
       const btn = document.createElement("button");
       btn.type = "button";
@@ -770,19 +767,20 @@ function renderChoice(choice) {
     go.addEventListener("click", () => submitChoice(picks));
     el.appendChild(go);
   }
+  return el;
 }
 
 async function submitChoice(picks) {
   if (!state.session || picks.some((n) => n < 0)) return;
-  const el = $("choice");
-  el.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+  const el = document.querySelector(".msg.choice");
+  el?.querySelectorAll("button").forEach((b) => { b.disabled = true; });
   try {
     await api(`/api/sessions/${state.session.id}/choose`, {
       method: "POST",
       body: JSON.stringify({ picks }),
     });
   } catch (err) {
-    el.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+    el?.querySelectorAll("button").forEach((b) => { b.disabled = false; });
     setStatus(err.message || String(err));
   }
 }
@@ -806,10 +804,12 @@ function connectStream(id) {
       const data = JSON.parse(ev.data);
       if (state.session) {
         const wasBusy = state.session.busy;
+        const wasChoice = JSON.stringify(state.session.choice || null);
         state.session.busy = data.busy;
         state.session.pane = data.pane;
         if ("subagents" in data) state.session.subagents = data.subagents;
-        if (wasBusy !== data.busy) {
+        if ("choice" in data) state.session.choice = data.choice;
+        if (wasBusy !== data.busy || wasChoice !== JSON.stringify(data.choice || null)) {
           renderMessages(mergeMessages(state.session.messages || []));
         }
       }
@@ -1429,20 +1429,6 @@ function bindDrop(el) {
 bindDrop($("chat"));
 bindDrop($("composer"));
 bindDrop($("tui"));
-$("btn-yes").addEventListener("click", () => {
-  if (state.session?.agent === "opencode" && state.session?.choice?.kind === "permission") {
-    submitChoice([0]);
-    return;
-  }
-  keys(["y", "Enter"]);
-});
-$("btn-no").addEventListener("click", () => {
-  if (state.session?.agent === "opencode" && state.session?.choice?.kind === "permission") {
-    submitChoice([2]);
-    return;
-  }
-  keys(["n", "Enter"]);
-});
 window.addEventListener("hashchange", onHash);
 
 let audioCtx = null;
