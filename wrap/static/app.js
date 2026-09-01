@@ -32,12 +32,216 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
-function renderMarkdown(text) {
-  const escaped = escapeHtml(text || "");
-  const withCode = escaped.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, _lang, body) => {
-    return `<div class="code-block"><button type="button" class="code-copy" aria-label="Copy code">Copy</button><pre><code>${body}</code></pre></div>`;
+const MD_FENCE = "\0FENCE";
+
+function inlineMd(s) {
+  const codes = [];
+  s = String(s || "").replace(/`([^`]+)`/g, (_, c) => {
+    codes.push(`<code>${c}</code>`);
+    return `\0C${codes.length - 1}\0`;
   });
-  return withCode.replace(/`([^`]+)`/g, "<code>$1</code>");
+  s = s.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_, t, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`,
+  );
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+  s = s.replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
+  s = s.replace(/\0C(\d+)\0/g, (_, n) => codes[Number(n)]);
+  return s;
+}
+
+function splitTableRow(line) {
+  let s = String(line || "").trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  const cells = [];
+  let cur = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\" && s[i + 1] === "|") {
+      cur += "|";
+      i++;
+      continue;
+    }
+    if (s[i] === "|") {
+      cells.push(cur.trim());
+      cur = "";
+      continue;
+    }
+    cur += s[i];
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+function isSepRow(line) {
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((c) => /^:?-{3,}:?$/.test(c));
+}
+
+function tableAlign(cell) {
+  const left = cell.startsWith(":");
+  const right = cell.endsWith(":");
+  if (left && right) return "c";
+  if (right) return "r";
+  return "";
+}
+
+function isTableStart(lines, i) {
+  if (i + 1 >= lines.length) return false;
+  if (lines[i].indexOf("|") === -1) return false;
+  if (lines[i].trim().startsWith(MD_FENCE)) return false;
+  return isSepRow(lines[i + 1]);
+}
+
+function parseTable(lines, i) {
+  const header = splitTableRow(lines[i]);
+  const aligns = splitTableRow(lines[i + 1]).map(tableAlign);
+  const cols = Math.max(header.length, aligns.length);
+  const body = [];
+  let r = i + 2;
+  while (r < lines.length) {
+    const line = lines[r];
+    if (!line.trim() || line.trim().startsWith(MD_FENCE)) break;
+    if (line.indexOf("|") === -1) break;
+    if (isSepRow(line)) break;
+    body.push(splitTableRow(line));
+    r++;
+  }
+  const cell = (tag, text, ai) => {
+    const cls = aligns[ai] || "";
+    const attr = cls ? ` class="${cls}"` : "";
+    return `<${tag}${attr}>${inlineMd(text || "")}</${tag}>`;
+  };
+  const pad = (row) => {
+    const out = row.slice(0, cols);
+    while (out.length < cols) out.push("");
+    return out;
+  };
+  let html = '<div class="md-table-wrap"><table><thead><tr>';
+  pad(header).forEach((c, ai) => {
+    html += cell("th", c, ai);
+  });
+  html += "</tr></thead>";
+  if (body.length) {
+    html += "<tbody>";
+    for (const row of body) {
+      html += "<tr>";
+      pad(row).forEach((c, ai) => {
+        html += cell("td", c, ai);
+      });
+      html += "</tr>";
+    }
+    html += "</tbody>";
+  }
+  html += "</table></div>";
+  return [html, r];
+}
+
+function renderMdBlocks(src) {
+  const lines = String(src || "").split("\n");
+  const out = [];
+  let i = 0;
+  const fenceRe = new RegExp(`^${MD_FENCE}(\\d+)$`);
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+    const fence = line.trim().match(fenceRe);
+    if (fence) {
+      out.push(`${MD_FENCE}${fence[1]}`);
+      i++;
+      continue;
+    }
+    if (isTableStart(lines, i)) {
+      const [html, next] = parseTable(lines, i);
+      out.push(html);
+      i = next;
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+?)(?:\s+#*)?$/);
+    if (heading) {
+      const n = heading[1].length;
+      out.push(`<h${n}>${inlineMd(heading[2])}</h${n}>`);
+      i++;
+      continue;
+    }
+    if (/^\s*([-*_]\s*){3,}$/.test(line) && line.indexOf("|") === -1) {
+      out.push("<hr>");
+      i++;
+      continue;
+    }
+    if (/^(&gt; ?)/.test(line)) {
+      const chunk = [];
+      while (i < lines.length && /^(&gt; ?)/.test(lines[i])) {
+        chunk.push(lines[i].replace(/^(&gt; ?)/, ""));
+        i++;
+      }
+      out.push(`<blockquote>${renderMdBlocks(chunk.join("\n"))}</blockquote>`);
+      continue;
+    }
+    const listItem = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (listItem) {
+      const ordered = /^\d/.test(listItem[2]);
+      const items = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+        if (!m) break;
+        if (/^\d/.test(m[2]) !== ordered) break;
+        let text = m[3];
+        i++;
+        while (i < lines.length) {
+          const cont = lines[i];
+          if (!cont.trim()) break;
+          if (/^\s*([-*+]|\d+[.)])\s+/.test(cont)) break;
+          if (isTableStart(lines, i) || /^#{1,6}\s+/.test(cont) || fenceRe.test(cont.trim())) break;
+          if (/^(&gt; ?)/.test(cont)) break;
+          text += " " + cont.trim();
+          i++;
+        }
+        items.push(text);
+      }
+      const tag = ordered ? "ol" : "ul";
+      out.push(
+        `<${tag}>${items.map((t) => `<li>${inlineMd(t)}</li>`).join("")}</${tag}>`,
+      );
+      continue;
+    }
+    const buf = [];
+    while (i < lines.length && lines[i].trim()) {
+      if (fenceRe.test(lines[i].trim())) break;
+      if (isTableStart(lines, i)) break;
+      if (/^#{1,6}\s+/.test(lines[i])) break;
+      if (/^(&gt; ?)/.test(lines[i])) break;
+      if (/^\s*([-*_]\s*){3,}$/.test(lines[i]) && lines[i].indexOf("|") === -1) break;
+      if (/^\s*[-*+]\s+/.test(lines[i]) || /^\s*\d+[.)]\s+/.test(lines[i])) break;
+      buf.push(lines[i]);
+      i++;
+    }
+    out.push(`<p>${inlineMd(buf.join("\n")).replace(/\n/g, "<br>")}</p>`);
+  }
+  return out.join("");
+}
+
+function renderMarkdown(text) {
+  const fences = [];
+  let escaped = escapeHtml(text || "").replace(/\r\n/g, "\n");
+  escaped = escaped.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, _lang, body) => {
+    const n = fences.length;
+    fences.push(
+      `<div class="code-block"><button type="button" class="code-copy" aria-label="Copy code">Copy</button><pre><code>${body}</code></pre></div>`,
+    );
+    return `\n${MD_FENCE}${n}\n`;
+  });
+  return renderMdBlocks(escaped).replace(
+    new RegExp(`${MD_FENCE}(\\d+)`, "g"),
+    (_, n) => fences[Number(n)] || "",
+  );
 }
 
 function copyText(text) {
@@ -117,6 +321,7 @@ function renderMessageBody(text) {
   }
   if (rest) {
     const body = document.createElement("div");
+    body.className = "md";
     body.innerHTML = renderMarkdown(rest);
     wrap.appendChild(body);
   }
