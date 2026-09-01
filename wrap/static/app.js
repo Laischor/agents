@@ -1477,6 +1477,11 @@ function playAlertSound() {
 }
 
 function onAlert(a) {
+  const ts = Number(a.ts) || 0;
+  if (ts && Date.now() / 1000 - ts > 30) return;
+  const watching =
+    document.visibilityState === "visible" && a.sid && state.session?.id === a.sid;
+  if (watching) return;
   playAlertSound();
   const title = a.title || "wrap";
   const body = a.body || "";

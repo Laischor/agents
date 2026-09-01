@@ -186,6 +186,7 @@ main {
   font: inherit; cursor: pointer;
   border: 1px solid var(--line); background: var(--bg-3); color: var(--ink);
   border-radius: 8px; padding: 8px 12px;
+  -webkit-appearance: none; appearance: none;
 }
 .ghost.danger { color: var(--danger); }
 .primary, #btn-send {
@@ -407,10 +408,23 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border-radius: 10px; padding: 10px 12px; font: inherit;
 }
 .row {
-  display: flex; justify-content: space-between; align-items: center;
-  gap: 8px; flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
 }
-.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+#btn-send {
+  width: auto;
+  justify-self: end;
+  align-self: start;
+  white-space: nowrap;
+}
 
 @media (max-width: 800px) {
   html, body { height: 100dvh; }
@@ -482,6 +496,9 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   #composer {
     padding: 10px 14px max(12px, env(safe-area-inset-bottom));
   }
+  .row { gap: 6px; }
+  .actions { gap: 6px; }
+  .ghost, #btn-send, #btn-int, .primary { padding: 8px 10px; }
   #input { max-height: min(30vh, 220px); }
   .msg { max-width: 100%; }
   .msg .code-copy {

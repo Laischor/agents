@@ -251,6 +251,78 @@ def parse_claude_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
     return merge_turns(out)[-limit:]
 
 
+def _jsonl_tail_records(path: Path, max_bytes: int = 262144) -> list[dict[str, Any]]:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    recs: list[dict[str, Any]] = []
+    with path.open("rb") as fh:
+        if size > max_bytes:
+            fh.seek(size - max_bytes)
+            fh.readline()
+        for raw in fh:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict):
+                recs.append(rec)
+    return recs
+
+
+def claude_turn_open(path: Path) -> bool:
+    """True while Claude still owes work after the last real user prompt.
+
+    A text-only assistant message closes the turn. Tool calls, tool-result
+    user rows, or a prompt with no assistant yet keep it open. Claude's Stop
+    hook fires after every response — including mid-task — so pane scraping
+    alone is not enough.
+    """
+    if not path or not path.is_file():
+        return False
+    in_turn = False
+    for rec in _jsonl_tail_records(path):
+        if rec.get("isSidechain") or rec.get("isMeta"):
+            continue
+        typ = rec.get("type")
+        msg = rec.get("message") or {}
+        content = msg.get("content")
+        if typ == "assistant":
+            has_tools = False
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        has_tools = True
+                        break
+            in_turn = has_tools
+            continue
+        if typ != "user":
+            continue
+        origin = (rec.get("origin") or {}).get("kind")
+        if rec.get("toolUseResult") is not None or origin in ("tool", "task-notification"):
+            in_turn = True
+            continue
+        text = ""
+        if isinstance(content, str):
+            text = extract_user_query(content)
+        elif isinstance(content, list):
+            bits = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    bits.append(extract_user_query(block.get("text") or ""))
+            text = "\n".join(b for b in bits if b)
+        else:
+            text = extract_user_query(str(content or ""))
+        if is_injected_user_message(text):
+            continue
+        in_turn = True
+    return in_turn
+
+
 def parse_cursor_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     if not path.is_file():

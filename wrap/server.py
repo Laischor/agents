@@ -42,10 +42,17 @@ STATE_PATH = Path(os.environ.get("WRAP_STATE", "/var/lib/wrap/state.json"))
 AGENTS = ("claude", "cursor", "opencode")
 # Status-line only. Avoid matching chat text ("thinking") or Claude's idle "⏵⏵ auto mode".
 BUSY_RE = re.compile(
-    r"esc to interrupt|ctrl\+c to interrupt|ctrl\+c to stop|"
+    r"esc to interrupt|esc to cancel|ctrl\+c to interrupt|ctrl\+c to stop|"
     r"Running\s+\d|Generating\s+\d",
     re.I,
 )
+_ALERT_URGENT_RE = re.compile(
+    r"permission|needs your permission|ask.?user|waiting for your permission",
+    re.I,
+)
+ALERT_SETTLE_SEC = 6.0
+ALERT_REPLAY_SEC = 45.0
+BUSY_HOLD_SEC = 2.5
 CLAUDE_MODELS = [
     {"id": "", "label": "CLI default"},
     {"id": "sonnet", "label": "Sonnet"},
@@ -69,10 +76,14 @@ _catalog_lock = threading.Lock()
 _catalog_cache: dict[str, Any] = {"at": 0.0, "data": None}
 _send_q: dict[str, Queue[str | None]] = {}
 _send_workers: dict[str, threading.Thread] = {}
+_sending: set[str] = set()
+_busy_hold: dict[str, float] = {}
 _alerts: deque[dict[str, Any]] = deque(maxlen=80)
 _alert_cv = threading.Condition()
 _alert_seq = 0
 _alert_last: dict[str, float] = {}
+_alert_timers: dict[str, threading.Timer] = {}
+_alert_timer_lock = threading.Lock()
 
 
 def log(msg: str) -> None:
@@ -108,14 +119,67 @@ def resolve_alert_sid(raw: str) -> str:
     return raw
 
 
-def push_alert(title: str, body: str, sid: str = "") -> dict[str, Any]:
+def _alert_urgent(title: str, body: str, sid: str) -> bool:
+    if _ALERT_URGENT_RE.search(f"{title} {body}"):
+        return True
+    if not sid:
+        return True
+    with _lock:
+        sess = SESSIONS.get(sid)
+    return bool(sess and session_choice(sess))
+
+
+def _cancel_alert_timer(sid: str) -> None:
+    with _alert_timer_lock:
+        timer = _alert_timers.pop(sid, None)
+    if timer is not None:
+        timer.cancel()
+
+
+def _emit_alert(item: dict[str, Any]) -> dict[str, Any]:
     global _alert_seq
-    sid = resolve_alert_sid(sid)
+    sid = str(item.get("sid") or "")
+    key = sid or str(item.get("title") or "")
     now = time.time()
-    key = sid or title
     if key and now - _alert_last.get(key, 0) < 1.2:
         return {}
     _alert_last[key] = now
+    item = {**item, "ts": now}
+    with _alert_cv:
+        _alert_seq += 1
+        item["seq"] = _alert_seq
+        _alerts.append(item)
+        _alert_cv.notify_all()
+    return item
+
+
+def _schedule_done_alert(sid: str, item: dict[str, Any]) -> None:
+    def flush() -> None:
+        with _alert_timer_lock:
+            if _alert_timers.get(sid) is not timer:
+                return
+            _alert_timers.pop(sid, None)
+        with _lock:
+            sess = SESSIONS.get(sid)
+        if sess and not session_choice(sess) and (
+            session_is_working(sess, hold=False) or session_recently_wrote(sess)
+        ):
+            _schedule_done_alert(sid, item)
+            return
+        _emit_alert(item)
+
+    timer = threading.Timer(ALERT_SETTLE_SEC, flush)
+    timer.daemon = True
+    with _alert_timer_lock:
+        old = _alert_timers.pop(sid, None)
+        _alert_timers[sid] = timer
+    if old is not None:
+        old.cancel()
+    timer.start()
+
+
+def push_alert(title: str, body: str, sid: str = "") -> dict[str, Any]:
+    sid = resolve_alert_sid(sid)
     sess_title = ""
     with _lock:
         sess = SESSIONS.get(sid) if sid else None
@@ -125,14 +189,14 @@ def push_alert(title: str, body: str, sid: str = "") -> dict[str, Any]:
         "sid": sid,
         "title": (title or sess_title or "wrap")[:80],
         "body": (body or "")[:160],
-        "ts": now,
+        "ts": time.time(),
     }
-    with _alert_cv:
-        _alert_seq += 1
-        item["seq"] = _alert_seq
-        _alerts.append(item)
-        _alert_cv.notify_all()
-    return item
+    if sid and not _alert_urgent(title, body, sid):
+        _schedule_done_alert(sid, item)
+        return item
+    if sid:
+        _cancel_alert_timer(sid)
+    return _emit_alert(item)
 
 
 def install_cmux_shim() -> None:
@@ -376,6 +440,51 @@ def pane_busy(pane: str) -> bool:
     # Cursor keeps "Running Nk tokens" above the current user prompt; keep a deep tail.
     tail = "\n".join((pane or "").splitlines()[-40:])
     return bool(BUSY_RE.search(tail))
+
+
+def session_recently_wrote(sess: dict[str, Any], sec: float = ALERT_SETTLE_SEC) -> bool:
+    """True if the native transcript was just written — another round may be incoming."""
+    if sess.get("agent") == "opencode":
+        return False
+    raw = sess.get("transcript")
+    path = Path(raw) if raw else pick_transcript(sess)
+    if not path or not path.is_file():
+        return False
+    try:
+        return time.time() - path.stat().st_mtime < sec
+    except OSError:
+        return False
+
+
+def _hold_busy(sid: str, busy: bool) -> bool:
+    now = time.time()
+    if busy:
+        _busy_hold[sid] = now + BUSY_HOLD_SEC
+        return True
+    return now < _busy_hold.get(sid, 0)
+
+
+def session_is_working(sess: dict[str, Any], pane: str = "", *, hold: bool = True) -> bool:
+    """True while the agent is mid-turn (pane, transcript, send queue, subagents)."""
+    sid = str(sess.get("id") or "")
+    busy = False
+    if sid and sid in _sending:
+        busy = True
+    if sess.get("tmux"):
+        text = pane if pane else tmux_capture(str(sess["tmux"]))
+        busy = busy or pane_busy(text)
+    elif sess.get("agent") == "opencode" and sess.get("oc_id"):
+        busy = busy or oc.session_busy(str(sess["oc_id"]), sess.get("cwd") or "")
+    if not busy and sess.get("agent") == "claude":
+        raw = sess.get("transcript")
+        path = Path(raw) if raw else pick_transcript(sess)
+        if path and path.is_file():
+            busy = tr.claude_turn_open(path)
+    if not busy:
+        busy = bool(session_subagents(sess))
+    if hold and sid:
+        return _hold_busy(sid, busy)
+    return busy
 
 
 def session_subagents(sess: dict[str, Any]) -> list[dict[str, Any]]:
@@ -723,11 +832,17 @@ def _drain_sends(sid: str) -> None:
             if not name or not tmux_has(name):
                 log(f"send dropped, tmux gone {sid}")
                 continue
-            tmux_wait_idle(name)
-            if not tmux_has(name):
-                continue
-            tmux_send_text(name, text)
-            tmux_wait_busy(name)
+            with _lock:
+                _sending.add(sid)
+            try:
+                tmux_wait_idle(name)
+                if not tmux_has(name):
+                    continue
+                tmux_send_text(name, text)
+                tmux_wait_busy(name)
+            finally:
+                with _lock:
+                    _sending.discard(sid)
         except Exception as exc:  # noqa: BLE001
             log(f"send failed {sid}: {exc}")
 
@@ -741,6 +856,10 @@ def stop_send_queue(sid: str) -> None:
             q.put_nowait(None)
         except Exception:
             pass
+    with _lock:
+        _sending.discard(sid)
+        _busy_hold.pop(sid, None)
+    _cancel_alert_timer(sid)
 
 
 def tmux_send_keys(name: str, keys: list[str]) -> None:
@@ -984,26 +1103,21 @@ def list_projects() -> list[dict[str, Any]]:
 def session_public(sess: dict[str, Any]) -> dict[str, Any]:
     apply_native_title(sess, persist=True)
     pane = ""
-    busy = False
     cmd = ""
     if sess.get("tmux"):
         pane = tmux_capture(sess["tmux"])
         cmd = tmux_alive_command(sess["tmux"])
-        busy = pane_busy(pane)
-    elif sess.get("agent") == "opencode" and sess.get("oc_id"):
-        busy = oc.session_busy(str(sess["oc_id"]), sess.get("cwd") or "")
     messages = load_messages(sess)
     live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or (
         sess["agent"] == "opencode" and bool(sess.get("oc_id"))
     )
     subagents = session_subagents(sess)
     choice = session_choice(sess)
-    if choice:
-        busy = True
+    busy = session_is_working(sess, pane) or bool(subagents) or bool(choice)
     return {
         **session_meta(sess),
         "pane": pane,
-        "busy": busy or bool(subagents),
+        "busy": busy,
         "subagents": subagents,
         "choice": choice,
         "command": cmd,
@@ -1499,13 +1613,9 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
         }
         if sess.get("tmux"):
             pane = tmux_capture(sess["tmux"])
-            pub["busy"] = pane_busy(pane) or bool(subagents) or bool(choice)
+            pub["busy"] = session_is_working(sess, pane) or bool(subagents) or bool(choice)
         elif sess.get("agent") == "opencode" and sess.get("oc_id"):
-            pub["busy"] = (
-                oc.session_busy(str(sess["oc_id"]), sess.get("cwd") or "")
-                or bool(subagents)
-                or bool(choice)
-            )
+            pub["busy"] = session_is_working(sess) or bool(subagents) or bool(choice)
         elif subagents or choice:
             pub["busy"] = True
         out.append(pub)
@@ -1812,18 +1922,39 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
-        last = 0
+        now = time.time()
+        raw_id = (self.headers.get("Last-Event-ID") or "").strip()
+        with _alert_cv:
+            last = int(_alert_seq)
+            backlog = list(_alerts)
+        if raw_id.isdigit():
+            want = int(raw_id)
+            missed = [
+                a
+                for a in backlog
+                if int(a.get("seq") or 0) > want
+                and now - float(a.get("ts") or 0) <= ALERT_REPLAY_SEC
+            ]
+            if missed:
+                last = want
         try:
             self.wfile.write(b": ping\n\n")
             self.wfile.flush()
             while True:
                 with _alert_cv:
-                    _alert_cv.wait(timeout=20)
                     items = [a for a in _alerts if int(a.get("seq") or 0) > last]
+                    if not items:
+                        _alert_cv.wait(timeout=20)
+                        items = [a for a in _alerts if int(a.get("seq") or 0) > last]
                 if items:
                     last = int(items[-1]["seq"])
                     for a in items:
-                        chunk = f"event: alert\ndata: {json.dumps(a, ensure_ascii=False)}\n\n"
+                        seq = int(a.get("seq") or 0)
+                        chunk = (
+                            f"id: {seq}\n"
+                            f"event: alert\n"
+                            f"data: {json.dumps(a, ensure_ascii=False)}\n\n"
+                        )
                         self.wfile.write(chunk.encode("utf-8"))
                 else:
                     self.wfile.write(b": ping\n\n")
@@ -1881,7 +2012,7 @@ class Handler(BaseHTTPRequestHandler):
                 fp = fingerprint(sess)
                 pane = tmux_capture(sess["tmux"]) if sess.get("tmux") else ""
                 subagents = session_subagents(sess)
-                busy = (pane_busy(pane) if pane else False) or bool(subagents)
+                busy = session_is_working(sess, pane) or bool(subagents)
                 pane_key = (pane, busy, tuple(s["id"] for s in subagents))
                 if fp != last:
                     last = fp
