@@ -515,7 +515,6 @@ function openDraft() {
   $("log").innerHTML = `<div class="empty">Pick a project and agent, then send a message</div>`;
   setStatus("");
   applyChrome();
-  renderChoice(null);
   renderSessions();
   $("project").focus();
   closeMenu();
@@ -531,7 +530,6 @@ function clearMain() {
   state.paneOpen = false;
   clearAttachments();
   applyChrome();
-  renderChoice(null);
   renderSessions();
   if (isNarrow()) setMenuOpen(true);
 }
@@ -922,6 +920,7 @@ function renderDiffBox(d) {
 }
 
 function renderChoice(choice) {
+  if (!choice) return null;
   const el = document.createElement("article");
   el.className = "msg assistant choice";
   const who = document.createElement("div");
