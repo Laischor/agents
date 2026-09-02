@@ -14,9 +14,16 @@
   --font: "Iowan Old Style", "Palatino Linotype", Palatino, "Times New Roman", serif;
   --mono: "IBM Plex Mono", "ui-monospace", Menlo, monospace;
   --sans: "Avenir Next", "Segoe UI", sans-serif;
+  color-scheme: dark;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+  /* Overlay bars hide; Linux Chromium then falls back to classic GTK widgets
+     (light Adwaita) on nested overflow:auto. Paint our own so dark mode holds. */
+  scrollbar-width: thin;
+  scrollbar-color: #555748 transparent;
+}
 html, body { height: 100%; margin: 0; }
 body {
   display: flex;
@@ -25,6 +32,16 @@ body {
   font-family: var(--sans);
   font-size: 15px;
 }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #4a4c3e;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: #6a6c5a; background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
 
 #scrim {
   display: none;
@@ -198,6 +215,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   flex: 1; overflow: auto; padding: 20px 24px 12px;
   display: flex; flex-direction: column; gap: 14px;
   min-height: 0;
+  background: var(--bg);
 }
 #chat {
   flex: 1; min-height: 0; position: relative;
