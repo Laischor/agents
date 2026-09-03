@@ -820,11 +820,13 @@ def list_native_history(
     cursor_home: Path,
     host_projects: Path,
     skip: set[tuple[str, str]] | None = None,
+    keep: set[tuple[str, str]] | None = None,
     limit: int = 80,
     titles: bool = True,
 ) -> list[dict[str, Any]]:
     """Closed CLI sessions from native stores (no wrap DB). OpenCode history is listed via HTTP."""
     skip = skip or set()
+    keep = keep or set()
     _ = host_projects
     rows: list[tuple[float, dict[str, Any]]] = []
 
@@ -859,8 +861,10 @@ def list_native_history(
                 )
 
     rows.sort(key=lambda item: item[0], reverse=True)
+    kept = [(mtime, item) for mtime, item in rows if (str(item.get("agent") or ""), str(item.get("native_id") or "")) in keep]
+    rest = [(mtime, item) for mtime, item in rows if (str(item.get("agent") or ""), str(item.get("native_id") or "")) not in keep]
     out: list[dict[str, Any]] = []
-    for mtime, item in rows[:limit]:
+    for mtime, item in kept + rest[:limit]:
         path = Path(item["transcript"]) if item.get("transcript") else None
         if titles:
             named = native_session_title(

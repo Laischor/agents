@@ -556,6 +556,7 @@ function sessionRow(s, onClick, onRemove) {
   const li = document.createElement("li");
   if (isActiveRow(s)) li.classList.add("on");
   if (s.live && s.id && s.id === state.pingSid) li.classList.add("ping");
+  if (s.pinned) li.classList.add("pinned");
   const name = sessionLabel(s);
   const bits = [agentLabel(s.agent)];
   const proj = projectName(s.cwd);
@@ -583,8 +584,26 @@ function sessionRow(s, onClick, onRemove) {
   }${escapeHtml(bits.filter(Boolean).join(" · "))}</span>${snip}`;
   btn.addEventListener("click", onClick);
   li.appendChild(btn);
+  const native = s.native_id || s.cli_session || s.oc_id;
+  if (native && s.agent) {
+    li.classList.add("has-actions");
+    const pin = document.createElement("button");
+    pin.type = "button";
+    pin.className = "sess-pin";
+    pin.setAttribute("aria-label", s.pinned ? "Unpin session" : "Pin session");
+    pin.setAttribute("aria-pressed", s.pinned ? "true" : "false");
+    pin.title = s.pinned ? "Unpin from top" : "Pin to top";
+    pin.innerHTML =
+      '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M10.1 1.4 8.4 3.1l.7 3.1-2.4 2.4-1-.3L3.2 10.8l2.5-2.5-.3-1 2.4-2.4 3.1.7 1.7-1.7-.5-2.5zM4.2 12.2 7 9.4l.9.9-2.8 2.8-.9-.9z"/></svg>';
+    pin.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      togglePin(s);
+    });
+    li.appendChild(pin);
+  }
   if (onRemove) {
-    li.classList.add("has-drop");
+    li.classList.add("has-actions");
     const drop = document.createElement("button");
     drop.type = "button";
     drop.className = "sess-drop";
@@ -624,6 +643,12 @@ function renderSessions() {
   const closedSrc = q
     ? state.searchHits || (state.history || []).filter((s) => matchesQuery(s, q))
     : state.history || [];
+  const liveKeys = new Set(live.map(nativePair).filter((k) => k !== ":"));
+  const pinnedLive = live.filter((s) => s.pinned);
+  const restLive = live.filter((s) => !s.pinned);
+  const pinnedClosed = closedSrc.filter((s) => s.pinned && !liveKeys.has(nativePair(s)));
+  const unpinnedClosed = closedSrc.filter((s) => !s.pinned);
+  const searching = Boolean(q) && state.searchHits === null && q.length >= 2;
   if (state.draft && matchesQuery({ title: "New session", cwd: state.cwd, agent: state.agent }, q)) {
     const li = document.createElement("li");
     li.className = "draft on";
@@ -633,32 +658,61 @@ function renderSessions() {
     li.querySelector("button").addEventListener("click", () => openDraft());
     ul.appendChild(li);
   }
-  if (!live.length && !state.draft) {
+  if (!pinnedLive.length && !restLive.length && !pinnedClosed.length && !state.draft && !searching) {
     const empty = document.createElement("li");
     empty.className = "muted";
     empty.textContent = q ? "No matching sessions" : "No active sessions";
     ul.appendChild(empty);
   }
-  for (const s of live) {
+  const openListed = (s) => {
+    if (s.live) attachSession(s.id);
+    else peekHistory(s);
+  };
+  for (const s of [...pinnedLive, ...pinnedClosed]) {
+    ul.appendChild(sessionRow(s, () => openListed(s)));
+  }
+  for (const s of restLive) {
     ul.appendChild(sessionRow(s, () => attachSession(s.id)));
   }
   const closedUl = $("closed");
   const closedHead = $("closed-head");
   closedUl.innerHTML = "";
   closedHead.textContent = q ? "Results" : "Closed";
-  const showClosed = closedSrc.length > 0 || Boolean(q);
+  const noHits =
+    Boolean(q) &&
+    !searching &&
+    !pinnedLive.length &&
+    !pinnedClosed.length &&
+    !restLive.length &&
+    !unpinnedClosed.length;
+  const showClosed = unpinnedClosed.length > 0 || searching || noHits;
   closedHead.hidden = !showClosed;
   closedUl.hidden = !showClosed;
-  if (q && !closedSrc.length) {
+  if (searching || noHits) {
     const empty = document.createElement("li");
     empty.className = "muted";
-    empty.textContent = state.searchHits === null && q.length >= 2 ? "Searching…" : "No matches";
+    empty.textContent = searching ? "Searching…" : "No matches";
     closedUl.appendChild(empty);
   }
-  for (const s of closedSrc) {
+  for (const s of unpinnedClosed) {
     closedUl.appendChild(sessionRow(s, () => peekHistory(s), () => hideClosed(s)));
   }
   $("btn-menu").classList.toggle("ping", Boolean(state.pingSid));
+}
+
+async function togglePin(item) {
+  const native = item?.native_id || item?.cli_session || item?.oc_id;
+  if (!native || !item.agent) return;
+  const next = !item.pinned;
+  try {
+    await api("/api/history/pin", {
+      method: "POST",
+      body: JSON.stringify({ agent: item.agent, native, pinned: next }),
+    });
+    await loadSessions();
+  } catch (err) {
+    setStatus(err.message || String(err));
+  }
 }
 
 async function loadSessions() {

@@ -1,7 +1,7 @@
 # agents
 
 Docker environment for coding agents: **Cursor CLI**, **Pi**, **Claude Code**, and **OpenCode**.  
-Also included: optional **Hermes Agent**, **Caveman**, and **CodeGraph**.  
+Also included: optional **Hermes Agent** and **Caveman**.  
 Projects stay on the host; agents run isolated in the container and drive Docker through the host socket.
 
 ## Requirements
@@ -49,7 +49,6 @@ dclaude()    { agents claude "$@"; }
 dopencode()  { agents opencode "$@"; }
 dwrap()      { agents wrap "$@"; }
 dhermes()    { agents hermes "$@"; }
-dcodegraph() { agents codegraph "$@"; }
 agents-shell() { agents bash "$@"; }
 ```
 
@@ -69,7 +68,6 @@ dclaude      # Claude Code (Anthropic)
 dopencode    # OpenCode
 dwrap        # wrap URL (native CLI sessions at :3780)
 dhermes      # Hermes Agent CLI (requires HERMES=1)
-dcodegraph   # CodeGraph CLI
 agents-shell
 ```
 
@@ -86,6 +84,8 @@ The launcher starts the container if needed and sets the working directory 1:1 t
 | OpenCode | `opencode serve` HTTP API (same backend as the TUI) | none |
 
 The container starts wrap on `0.0.0.0:3780` (host: `http://127.0.0.1:3780`). Pick a project, choose model/effort, then **New** — several sessions per project and agent can run in parallel. A message is pasted into that session's live TUI (or posted to OpenCode). Chat bubbles come from the CLI's own transcript, not a second agent.
+
+Pin a session with the thumbtack in the sidebar — pinned sessions stay at the top of the list after wrap restarts, even when they are closed.
 
 ```bash
 open http://127.0.0.1:3780
@@ -265,33 +265,23 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 
 ## Process hygiene (long-lived container)
 
-The `agents` container stays up for many `compose exec` / Hermes sessions. Each session can leave behind MCP children (`codegraph serve`) or zombies. Compose enables:
+The `agents` container stays up for many `compose exec` / Hermes sessions. Each session can leave behind child processes or zombies. Compose enables:
 
 - **`init: true`** — Docker’s tini as PID 1 reaps zombies
 - **`mem_limit`** — hard memory cap so thrash cannot freeze the whole container (default `3g` via `AGENTS_MEM_LIMIT`; Colima default `4g` via `COLIMA_MEMORY`)
-- **`agents-janitor`** — background loop (started once via the entrypoint) that kills *orphaned* `codegraph` trees with no living `claude` / Cursor / OpenCode parent; under low `MemAvailable` (&lt;256 MiB) it also drops the oldest orphans first. Log: `/var/log/agents-janitor.log`
 
 After changing these, rebuild/recreate from the **host** (`./start.sh` or `docker compose up -d --build agents`). Check: `docker compose exec agents ps -p 1 -o args=` (should show `docker-init` / tini) and `docker stats agents` (≈3 Gi limit).
 
-## Caveman & CodeGraph
+## Caveman
 
 On container start the entrypoint registers (idempotent):
 
-| Agent        | Caveman                                      | CodeGraph                                      |
-|--------------|----------------------------------------------|------------------------------------------------|
-| Pi           | `pi-caveman` package                         | `pi-codegraph` + CLI `codegraph`               |
-| Claude Code  | Plugin `caveman@caveman` (default: **ultra**) | MCP `codegraph serve --mcp`                    |
-| Cursor CLI   | —                                            | MCP in `~/.cursor/mcp.json`                    |
-| OpenCode     | —                                            | MCP in `~/.config/opencode/opencode.json`      |
+| Agent        | Caveman                                      |
+|--------------|----------------------------------------------|
+| Pi           | `pi-caveman` package                         |
+| Claude Code  | Plugin `caveman@caveman` (default: **ultra**) |
 
 Default mode for Claude: `CAVEMAN_DEFAULT_MODE=ultra` in `docker-compose.yml`. Override per session with `/caveman lite|full|ultra`.
-
-Index each project once:
-
-```bash
-cd ~/Documents/projects/my-project
-dcodegraph init
-```
 
 ## Docker from the agent
 

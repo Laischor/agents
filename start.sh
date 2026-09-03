@@ -163,7 +163,8 @@ ensure_data_dirs() {
     "$AGENTS_DIR/data/cmux/running" \
     "$AGENTS_DIR/data/cmux/results" \
     "$AGENTS_DIR/data/cmux/logs" \
-    "$AGENTS_DIR/data/cmux/sessions"
+    "$AGENTS_DIR/data/cmux/sessions" \
+    "$AGENTS_DIR/data/wrap"
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes" "$AGENTS_DIR/data/open-webui"
   fi

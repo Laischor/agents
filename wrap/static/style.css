@@ -103,15 +103,15 @@ h2 {
   display: flex; flex-direction: column; gap: 4px;
 }
 #closed-head[hidden], #closed[hidden] { display: none !important; }
-#sessions li button, #closed li .sess-open, #sessions .muted, #closed .muted {
+#sessions li .sess-open, #closed li .sess-open, #sessions .muted, #closed .muted {
   width: 100%; text-align: left; background: transparent; border: 0;
   color: var(--ink); padding: 8px 10px; border-radius: 8px; cursor: pointer;
   font: inherit; font-size: 13px;
 }
-#sessions li button, #closed li .sess-open {
+#sessions li .sess-open, #closed li .sess-open {
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
 }
-#sessions li button:hover, #sessions li.on button,
+#sessions li .sess-open:hover, #sessions li.on .sess-open,
 #closed li .sess-open:hover, #closed li.on .sess-open { background: var(--bg-3); }
 #sessions .muted, #closed .muted { color: var(--muted); cursor: default; font-size: 12px; }
 #sessions .sess-title, #closed .sess-title {
@@ -123,7 +123,7 @@ h2 {
 }
 #sessions .sess-meta, #closed .sess-meta { color: var(--muted); font-size: 11px; }
 #sessions .sess-meta .busy { color: var(--accent-2); }
-#closed .sess-snip {
+#sessions .sess-snip, #closed .sess-snip {
   color: var(--muted);
   font-size: 11px;
   overflow: hidden;
@@ -132,17 +132,17 @@ h2 {
   max-width: 100%;
   opacity: 0.85;
 }
-#closed li.has-drop {
+#closed li.has-drop, #sessions li.has-actions, #closed li.has-actions {
   display: flex;
   align-items: stretch;
   gap: 0;
 }
-#closed li.has-drop .sess-open {
+#closed li.has-drop .sess-open, #sessions li.has-actions .sess-open, #closed li.has-actions .sess-open {
   flex: 1;
   min-width: 0;
   width: auto;
 }
-#closed li .sess-drop {
+#closed li .sess-drop, #sessions li .sess-pin, #closed li .sess-pin {
   flex: 0 0 28px;
   width: 28px;
   padding: 0;
@@ -155,14 +155,26 @@ h2 {
   border-radius: 8px;
   cursor: pointer;
   opacity: 0.5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 #closed li .sess-drop:hover {
   color: var(--danger);
   background: var(--bg-3);
   opacity: 1;
 }
-#sessions li.draft button { border: 1px dashed var(--line); }
-#sessions li.ping button {
+#sessions li .sess-pin:hover, #closed li .sess-pin:hover,
+#sessions li .sess-pin[aria-pressed="true"], #closed li .sess-pin[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--bg-3);
+  opacity: 1;
+}
+#sessions li.pinned .sess-open, #closed li.pinned .sess-open {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+#sessions li.draft .sess-open { border: 1px dashed var(--line); }
+#sessions li.ping .sess-open {
   animation: wrap-ping 0.55s ease 0s 3;
 }
 @keyframes wrap-ping {

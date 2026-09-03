@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runtime setup for mounted agent configs (Pi packages, Claude plugins/MCP, Cursor/OpenCode MCP, wrap serve).
+# Runtime setup for mounted agent configs (Pi packages, Claude plugins, Cursor/OpenCode hooks, wrap serve).
 # Image build cannot write into volume-mounted ~/.pi / ~/.claude / ~/.cursor / ~/.config/opencode.
 
 set -u
@@ -120,93 +120,6 @@ path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 }
 
-ensure_claude_codegraph_mcp() {
-  if ! command -v claude >/dev/null 2>&1 || ! command -v codegraph >/dev/null 2>&1; then
-    return
-  fi
-
-  mkdir -p "${CLAUDE_CONFIG_DIR:-/root/.claude}"
-
-  # Must be user scope: default `claude mcp add` is local to the entrypoint cwd
-  # (HOST_PROJECTS), so child projects like ~/…/game never saw codegraph.
-  local scope_info=""
-  scope_info="$(claude mcp get codegraph 2>/dev/null || true)"
-  if printf '%s\n' "$scope_info" | grep -Eqi 'Scope:[[:space:]]*User'; then
-    return
-  fi
-
-  # Drop stale project-local registration from older entrypoints (ignore errors)
-  claude mcp remove codegraph -s local >/dev/null 2>&1 || true
-
-  printf 'Configuring Claude MCP (user scope): codegraph\n'
-  if ! claude mcp add -s user codegraph -- codegraph serve --mcp; then
-    printf 'warning: could not add codegraph MCP to Claude\n' >&2
-  fi
-}
-
-# OpenCode global config is mounted at /root/.config/opencode
-ensure_opencode_codegraph_mcp() {
-  if ! command -v opencode >/dev/null 2>&1 || ! command -v codegraph >/dev/null 2>&1; then
-    return
-  fi
-
-  local cfg_dir="${HOME}/.config/opencode"
-  local cfg="${cfg_dir}/opencode.json"
-  mkdir -p "$cfg_dir"
-
-  if [[ -f "$cfg" ]] && grep -Fq '"codegraph"' "$cfg" 2>/dev/null; then
-    return
-  fi
-
-  printf 'Configuring OpenCode MCP: codegraph\n'
-  if ! command -v python3 >/dev/null 2>&1; then
-    printf 'warning: python3 missing; skip OpenCode codegraph MCP\n' >&2
-    return
-  fi
-
-  OPENCODE_CFG="$cfg" python3 - <<'PY'
-import json, os
-from pathlib import Path
-
-path = Path(os.environ["OPENCODE_CFG"])
-data = {}
-if path.exists():
-    try:
-        data = json.loads(path.read_text() or "{}")
-    except json.JSONDecodeError:
-        data = {}
-data.setdefault("$schema", "https://opencode.ai/config.json")
-data.setdefault("autoupdate", False)
-mcp = data.setdefault("mcp", {})
-if "codegraph" not in mcp:
-    mcp["codegraph"] = {
-        "type": "local",
-        "command": ["codegraph", "serve", "--mcp"],
-        "enabled": True,
-    }
-path.write_text(json.dumps(data, indent=2) + "\n")
-PY
-}
-
-# Cursor CLI config is mounted at /root/.cursor
-ensure_cursor_codegraph_mcp() {
-  if ! command -v codegraph >/dev/null 2>&1; then
-    return
-  fi
-
-  local mcp_json="${HOME}/.cursor/mcp.json"
-  mkdir -p "${HOME}/.cursor"
-
-  if [[ -f "$mcp_json" ]] && grep -Fq '"codegraph"' "$mcp_json" 2>/dev/null; then
-    return
-  fi
-
-  printf 'Configuring Cursor MCP: codegraph\n'
-  if ! codegraph install --target=cursor --location=global --yes --no-permissions; then
-    printf 'warning: could not configure codegraph MCP for Cursor\n' >&2
-  fi
-}
-
 # Wire Claude Notification/Stop → cmux stub (host cmux-bridge for sounds/rings).
 # Idempotent: skips when our marker command is already present.
 ensure_claude_cmux_hooks() {
@@ -318,37 +231,6 @@ path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 }
 
-# Single background janitor: kill orphaned codegraph MCP trees; reap via init:true.
-ensure_agents_janitor() {
-  local pid_file="/var/run/agents-janitor.pid"
-  local log_file="/var/log/agents-janitor.log"
-  local janitor="/usr/local/bin/agents-janitor"
-
-  [[ -x "$janitor" ]] || return 0
-
-  mkdir -p /var/run /var/log
-
-  if [[ -f "$pid_file" ]]; then
-    local old
-    old="$(tr -d ' \n' <"$pid_file" 2>/dev/null || true)"
-    if [[ -n "$old" ]] && kill -0 "$old" 2>/dev/null; then
-      return 0
-    fi
-    rm -f "$pid_file"
-  fi
-
-  # Belts: any live janitor process (pidfile may be stale after OOM)
-  if pgrep -f '^bash /usr/local/bin/agents-janitor$' >/dev/null 2>&1 \
-    || pgrep -f '^/usr/local/bin/agents-janitor$' >/dev/null 2>&1; then
-    return 0
-  fi
-
-  # Disown from this exec session so the janitor outlives interactive shells.
-  # Script itself flock-locks so a race still yields a single instance.
-  nohup "$janitor" >>"$log_file" 2>&1 &
-  printf '%s\n' "$!" >"$pid_file"
-}
-
 # Native-session wrap (tmux Claude/Cursor, OpenCode HTTP). Only the
 # long-lived agents service sets AGENTS_WRAP_SERVE=1.
 ensure_wrap_serve() {
@@ -389,16 +271,10 @@ ensure_git_identity
 
 ensure_pi_package "v2nic/pi-caveman" \
   "git:github.com/v2nic/pi-caveman@2480692ffabddc3d1efec8eb822e664ff7e0e5ef"
-ensure_pi_package "@vndv/pi-codegraph" \
-  "npm:@vndv/pi-codegraph@0.1.10"
 
 ensure_claude_caveman
-ensure_claude_codegraph_mcp
 ensure_claude_cmux_hooks
-ensure_cursor_codegraph_mcp
 ensure_cursor_cmux_hooks
-ensure_opencode_codegraph_mcp
-ensure_agents_janitor
 ensure_wrap_serve
 
 exec "$@"

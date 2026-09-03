@@ -4,7 +4,6 @@ FROM node:24-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/root/.local/bin:${PATH}" \
-    CODEGRAPH_TELEMETRY=0 \
     IS_SANDBOX=1
 
 RUN apt-get update \
@@ -84,10 +83,6 @@ RUN curl https://cursor.com/install -fsS | bash \
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent \
   && pi --version
 
-# CodeGraph CLI (MCP for Claude/Cursor; used by pi-codegraph)
-RUN npm install -g @colbymchenry/codegraph@1.4.1 \
-  && codegraph --version
-
 # Claude Code
 RUN npm install -g @anthropic-ai/claude-code \
   && claude --version
@@ -122,7 +117,6 @@ ENV AGENTS_CLIPBOARD_DIR=/var/agents-clipboard \
     AGENTS_GPU_DIR=/var/agents-gpu \
     AGENTS_CMUX_DIR=/var/agents-cmux
 COPY clipboard/xclip clipboard/wl-paste /usr/local/bin/
-COPY bin/agents-janitor.sh /usr/local/bin/agents-janitor
 COPY bin/wrap-serve.sh /usr/local/bin/wrap-serve
 COPY wrap/ /usr/local/share/wrap/
 # Host GPU bridge shims (Blender/Godot run on macOS via gpu-bridge.sh)
@@ -130,13 +124,12 @@ COPY bin/gpu-job bin/blender bin/godot /usr/local/bin/
 # Host cmux bridge stub (notifications/sounds via cmux-bridge.sh on macOS)
 COPY bin/cmux bin/cmux-agent-hook /usr/local/bin/
 RUN chmod +x /usr/local/bin/xclip /usr/local/bin/wl-paste \
-      /usr/local/bin/agents-janitor \
       /usr/local/bin/wrap-serve \
       /usr/local/bin/gpu-job /usr/local/bin/blender /usr/local/bin/godot \
       /usr/local/bin/cmux /usr/local/bin/cmux-agent-hook \
   && mkdir -p /var/agents-clipboard /var/agents-gpu /var/agents-cmux /var/log /var/run
 
-# Runtime: register Pi packages + Claude/Cursor MCP into mounted config dirs
+# Runtime: register Pi packages + Claude plugins into mounted config dirs
 COPY container-entrypoint.sh /usr/local/bin/container-entrypoint
 RUN chmod +x /usr/local/bin/container-entrypoint
 

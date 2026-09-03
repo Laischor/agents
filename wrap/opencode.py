@@ -657,7 +657,12 @@ def providers(cwd: Path | str | None = None) -> list[dict[str, str]]:
     return out
 
 
-def history_rows(projects: list[Path], skip: set[str], limit: int = 80) -> list[dict[str, Any]]:
+def history_rows(
+    projects: list[Path],
+    skip: set[str],
+    limit: int = 80,
+    keep: set[str] | None = None,
+) -> list[dict[str, Any]]:
     ensure_serve()
     rows: list[tuple[float, dict[str, Any]]] = []
     seen: set[str] = set()
@@ -693,7 +698,10 @@ def history_rows(projects: list[Path], skip: set[str], limit: int = 80) -> list[
                 )
             )
     rows.sort(key=lambda item: item[0], reverse=True)
-    return [item for _, item in rows[:limit]]
+    keep = keep or set()
+    kept = [item for _, item in rows if str(item.get("native_id") or "") in keep]
+    rest = [item for _, item in rows if str(item.get("native_id") or "") not in keep]
+    return kept + rest[:limit]
 
 
 def _time_sec(raw: Any) -> float:

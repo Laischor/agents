@@ -100,6 +100,7 @@ EFFORT_LEVELS = [
 _lock = threading.RLock()
 SESSIONS: dict[str, dict[str, Any]] = {}
 HIDDEN: set[str] = set()
+PINNED: list[str] = []  # agent:native_id, most recently pinned last
 _catalog_lock = threading.Lock()
 _catalog_cache: dict[str, Any] = {"at": 0.0, "data": None}
 _send_q: dict[str, Queue[str | None]] = {}
@@ -738,7 +739,11 @@ def tmux_alive_command(name: str) -> str:
 def persist_state() -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        payload = {"sessions": list(SESSIONS.values()), "hidden": sorted(HIDDEN)}
+        payload = {
+            "sessions": list(SESSIONS.values()),
+            "hidden": sorted(HIDDEN),
+            "pinned": list(PINNED),
+        }
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     tmp.replace(STATE_PATH)
@@ -755,12 +760,20 @@ def load_state() -> None:
         return
     items = data.get("sessions")
     hidden = data.get("hidden")
+    pinned = data.get("pinned")
     with _lock:
         HIDDEN.clear()
+        PINNED.clear()
         if isinstance(hidden, list):
             for key in hidden:
                 if isinstance(key, str) and ":" in key:
                     HIDDEN.add(key)
+        if isinstance(pinned, list):
+            seen: set[str] = set()
+            for key in pinned:
+                if isinstance(key, str) and ":" in key and key not in seen:
+                    PINNED.append(key)
+                    seen.add(key)
         if not isinstance(items, list):
             return
         for sess in items:
@@ -1302,6 +1315,7 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
         "command": cmd,
         "messages": messages,
         "live": live,
+        "pinned": native_is_pinned(*native_key(sess)),
     }
 
 
@@ -1459,9 +1473,49 @@ def hide_history(agent: str, native_id: str) -> None:
     native_id = (native_id or "").strip()
     if agent not in AGENTS or not native_id:
         raise ValueError("agent and native required")
+    key = hide_key(agent, native_id)
     with _lock:
-        HIDDEN.add(hide_key(agent, native_id))
+        HIDDEN.add(key)
+        PINNED[:] = [item for item in PINNED if item != key]
     persist_state()
+
+
+def history_pinned() -> set[tuple[str, str]]:
+    with _lock:
+        keys = list(PINNED)
+    out: set[tuple[str, str]] = set()
+    for key in keys:
+        if ":" not in key:
+            continue
+        agent, native = key.split(":", 1)
+        if agent and native:
+            out.add((agent, native))
+    return out
+
+
+def native_is_pinned(agent: str, native_id: str) -> bool:
+    agent = (agent or "").strip()
+    native_id = (native_id or "").strip()
+    if not agent or not native_id:
+        return False
+    with _lock:
+        return hide_key(agent, native_id) in PINNED
+
+
+def set_pinned(agent: str, native_id: str, pinned: bool) -> list[str]:
+    agent = (agent or "").strip()
+    native_id = (native_id or "").strip()
+    if agent not in AGENTS or not native_id:
+        raise ValueError("agent and native required")
+    key = hide_key(agent, native_id)
+    with _lock:
+        PINNED[:] = [item for item in PINNED if item != key]
+        if pinned:
+            PINNED.append(key)
+            HIDDEN.discard(key)
+        out = list(PINNED)
+    persist_state()
+    return out
 
 
 def live_native_skip() -> tuple[set[tuple[str, str]], set[str]]:
@@ -1484,23 +1538,44 @@ def live_native_skip() -> tuple[set[tuple[str, str]], set[str]]:
 def list_history() -> list[dict[str, Any]]:
     projects = [Path(p["path"]) for p in list_projects()]
     skip, oc_skip = live_native_skip()
-    hidden = history_hidden()
+    pinned = history_pinned()
+    hidden = history_hidden() - pinned
     skip |= hidden
     oc_skip |= {n for a, n in hidden if a == "opencode"}
+    keep = {key for key in pinned if key not in skip}
     cli = tr.list_native_history(
         projects,
         claude_home=CLAUDE_HOME,
         cursor_home=CURSOR_HOME,
         host_projects=HOST_PROJECTS,
         skip=skip,
+        keep=keep,
     )
     try:
-        oc_rows = oc.history_rows(projects, skip=oc_skip)
+        oc_rows = oc.history_rows(
+            projects,
+            skip=oc_skip,
+            keep={n for a, n in keep if a == "opencode"},
+        )
     except RuntimeError:
         oc_rows = []
     merged = cli + oc_rows
+    for item in merged:
+        key = (str(item.get("agent") or ""), str(item.get("native_id") or ""))
+        item["pinned"] = key in pinned
     merged.sort(key=lambda item: float(item.get("updated") or 0), reverse=True)
-    return merged[:80]
+    with _lock:
+        rank = {key: i for i, key in enumerate(PINNED)}
+    pinned_rows = [item for item in merged if item.get("pinned")]
+    rest = [item for item in merged if not item.get("pinned")]
+    pinned_rows.sort(
+        key=lambda item: rank.get(
+            hide_key(str(item.get("agent") or ""), str(item.get("native_id") or "")),
+            -1,
+        ),
+        reverse=True,
+    )
+    return pinned_rows + rest[:80]
 
 
 def _history_blob(item: dict[str, Any]) -> str:
@@ -1538,7 +1613,8 @@ def search_history(query: str, limit: int = 40) -> list[dict[str, Any]]:
         return []
     projects = [Path(p["path"]) for p in list_projects()]
     skip, oc_skip = live_native_skip()
-    hidden = history_hidden()
+    pinned = history_pinned()
+    hidden = history_hidden() - pinned
     skip |= hidden
     oc_skip |= {n for a, n in hidden if a == "opencode"}
     cli = tr.list_native_history(
@@ -1592,6 +1668,9 @@ def search_history(query: str, limit: int = 40) -> list[dict[str, Any]]:
                 break
     for row in hits:
         _fill_history_title(row)
+        key = (str(row.get("agent") or ""), str(row.get("native_id") or ""))
+        row["pinned"] = key in pinned
+    hits.sort(key=lambda item: (not item.get("pinned"), -float(item.get("updated") or 0)))
     return hits
 
 
@@ -1659,6 +1738,7 @@ def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
         "command": "",
         "messages": messages,
         "live": False,
+        "pinned": native_is_pinned(agent, native_id),
     }
 
 
@@ -1797,10 +1877,12 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
             pub["busy"] = session_is_working(sess) or bool(subagents) or bool(choice)
         elif subagents or choice:
             pub["busy"] = True
+        pub["pinned"] = native_is_pinned(*native_key(sess))
         out.append(pub)
     if changed:
         persist_state()
     out.sort(key=lambda s: s.get("created") or "", reverse=True)
+    out.sort(key=lambda s: 0 if s.get("pinned") else 1)
     return out
 
 
@@ -1969,6 +2051,17 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/history/hide":
                 hide_history(str(data.get("agent") or ""), str(data.get("native") or ""))
                 st, raw, ct = json_bytes({"ok": True})
+                return self._send(st, raw, ct)
+            if path == "/api/history/pin":
+                pinned = data.get("pinned")
+                if not isinstance(pinned, bool):
+                    raise ValueError("pinned must be true or false")
+                keys = set_pinned(
+                    str(data.get("agent") or ""),
+                    str(data.get("native") or ""),
+                    pinned,
+                )
+                st, raw, ct = json_bytes({"ok": True, "pinned": keys})
                 return self._send(st, raw, ct)
             if path == "/api/sessions":
                 attach = str(data.get("id") or "")

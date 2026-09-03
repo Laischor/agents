@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch an agent CLI inside the agents container.
-# Usage: run.sh <agent|pi|claude|opencode|wrap|hermes|hermes-setup|cursor-agent|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]
+# Usage: run.sh <agent|pi|claude|opencode|wrap|hermes|hermes-setup|cursor-agent|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]
 
 set -euo pipefail
 
@@ -81,7 +81,8 @@ ensure_services() {
     "$AGENTS_DIR/data/gpu/logs" \
     "$AGENTS_DIR/data/cmux/jobs" "$AGENTS_DIR/data/cmux/running" \
     "$AGENTS_DIR/data/cmux/results" "$AGENTS_DIR/data/cmux/logs" \
-    "$AGENTS_DIR/data/cmux/sessions"
+    "$AGENTS_DIR/data/cmux/sessions" \
+    "$AGENTS_DIR/data/wrap"
   local compose_args=()
   if hermes_enabled; then
     mkdir -p "$AGENTS_DIR/data/hermes" "$AGENTS_DIR/data/open-webui"
@@ -166,15 +167,15 @@ CMUX_DOCKER_ENV=(
 
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
-  echo "usage: $(basename "$0") <agent|pi|claude|opencode|wrap|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]" >&2
+  echo "usage: $(basename "$0") <agent|pi|claude|opencode|wrap|hermes|hermes-setup|clipboard-bridge|gpu-bridge|cmux-bridge|bash> [args...]" >&2
   exit 1
 fi
 shift
 
 case "$cmd" in
-  agent|cursor-agent|pi|claude|opencode|wrap|hermes|hermes-setup|codegraph|clipboard-bridge|gpu-bridge|cmux-bridge|bash) ;;
+  agent|cursor-agent|pi|claude|opencode|wrap|hermes|hermes-setup|clipboard-bridge|gpu-bridge|cmux-bridge|bash) ;;
   *)
-    echo "unknown command: $cmd (expected agent, pi, claude, opencode, wrap, hermes, hermes-setup, codegraph, clipboard-bridge, gpu-bridge, cmux-bridge, or bash)" >&2
+    echo "unknown command: $cmd (expected agent, pi, claude, opencode, wrap, hermes, hermes-setup, clipboard-bridge, gpu-bridge, cmux-bridge, or bash)" >&2
     exit 1
     ;;
 esac
