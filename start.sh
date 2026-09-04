@@ -332,11 +332,6 @@ start_agents() {
     log "HERMES=0 — stoppe hermes…"
     "${COMPOSE[@]}" --profile hermes stop hermes >/dev/null 2>&1 || true
   fi
-  # Drop leftover chat UI / metasearch containers (no longer in compose)
-  if docker ps -a --format '{{.Names}}' | grep -Eqx 'open-webui|hermes-webui|searxng'; then
-    log "Entferne alte Container: open-webui / hermes-webui / searxng…"
-    docker rm -f open-webui hermes-webui searxng >/dev/null 2>&1 || true
-  fi
   if firecrawl_enabled || hermes_enabled; then
     if ! hermes_enabled; then
       start_msg+=" + firecrawl"
