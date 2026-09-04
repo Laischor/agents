@@ -67,8 +67,7 @@ COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins /usr/local/libexec/docker/cli-plugins
 
 # Cursor CLI (provides `agent` / `cursor-agent`)
-# Install under /usr/local — Hermes docker backend overlays /root with a
-# sandbox volume/tmpfs, which would hide ~/.local and break symlink targets.
+# Install under /usr/local so bind-mounts over ~/.local cannot hide the binary.
 RUN curl https://cursor.com/install -fsS | bash \
   && mkdir -p /usr/local/lib \
   && rm -rf /usr/local/lib/cursor-agent \
@@ -87,7 +86,7 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent \
 RUN npm install -g @anthropic-ai/claude-code \
   && claude --version
 
-# OpenCode (native binary under /usr/local — Hermes docker backend overlays /root)
+# OpenCode (native binary under /usr/local)
 # Same as Claude/Cursor/Pi: track latest. GitHub /releases/latest/download avoids the API.
 RUN arch="$(dpkg --print-architecture)" \
   && case "$arch" in \

@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 
-const AGENT_LABEL = { claude: "Claude", cursor: "Cursor", opencode: "OpenCode" };
+const AGENT_LABEL = { claude: "Claude", cursor: "Cursor", opencode: "OpenCode", hermes: "Hermes" };
 
 const state = {
   agent: "claude",
@@ -390,6 +390,7 @@ function sortModels(items) {
 }
 
 function applyCatalog() {
+  fillAgents();
   const cat = state.catalog[state.agent] || { models: [], effort: [], fast: false };
   const prefs = loadPrefs();
   const model = state.session ? state.session.model || "" : prefs.model || "";
@@ -399,6 +400,29 @@ function applyCatalog() {
   fillSelect($("effort"), cat.effort, effort);
   $("fast-wrap").hidden = !cat.fast;
   $("fast").checked = cat.fast ? fast : false;
+}
+
+function fillAgents() {
+  const el = $("agent");
+  if (!el) return;
+  const agents = state.catalog.agents || [
+    { id: "claude", label: "Claude" },
+    { id: "cursor", label: "Cursor" },
+    { id: "opencode", label: "OpenCode" },
+  ];
+  const current = state.agent || el.value;
+  el.innerHTML = "";
+  for (const a of agents) {
+    const opt = document.createElement("option");
+    opt.value = a.id;
+    opt.textContent = a.label || AGENT_LABEL[a.id] || a.id;
+    el.appendChild(opt);
+  }
+  if ([...el.options].some((o) => o.value === current)) el.value = current;
+  else if (el.options.length) {
+    state.agent = el.options[0].value;
+    el.value = state.agent;
+  }
 }
 
 function fillProjects() {
@@ -471,7 +495,9 @@ function applyChrome() {
       ? "Send a message to resume this session…"
       : sess?.agent === "opencode"
         ? "Message OpenCode… paste a screenshot"
-        : "Message the native CLI… paste a screenshot";
+        : sess?.agent === "hermes"
+          ? "Message Hermes… paste a screenshot"
+          : "Message the native CLI… paste a screenshot";
   $("btn-send").disabled = !canCompose() || state.paneOpen;
   $("btn-int").hidden = !running;
   $("btn-clear").hidden = !(viewing && sess?.cwd && (sess?.agent || state.agent));
@@ -535,7 +561,7 @@ function clearMain() {
 }
 
 function isWrapDefaultTitle(t) {
-  return / · (claude|cursor|opencode)( · |$)/i.test(t || "");
+  return / · (claude|cursor|opencode|hermes)( · |$)/i.test(t || "");
 }
 
 function sessionLabel(s) {
@@ -548,7 +574,7 @@ function sessionLabel(s) {
 function isActiveRow(s) {
   if (!state.session) return false;
   if (s.live) return s.id === state.session.id;
-  const native = state.session.native_id || state.session.cli_session || state.session.oc_id || "";
+  const native = state.session.native_id || state.session.cli_session || state.session.oc_id || state.session.hm_id || "";
   return Boolean(s.native_id && s.native_id === native && s.agent === state.session.agent);
 }
 
@@ -584,7 +610,7 @@ function sessionRow(s, onClick, onRemove) {
   }${escapeHtml(bits.filter(Boolean).join(" · "))}</span>${snip}`;
   btn.addEventListener("click", onClick);
   li.appendChild(btn);
-  const native = s.native_id || s.cli_session || s.oc_id;
+  const native = s.native_id || s.cli_session || s.oc_id || s.hm_id;
   if (native && s.agent) {
     li.classList.add("has-actions");
     const pin = document.createElement("button");
@@ -632,7 +658,7 @@ function matchesQuery(s, q) {
 }
 
 function nativePair(s) {
-  return `${s.agent || ""}:${s.native_id || s.cli_session || s.oc_id || ""}`;
+  return `${s.agent || ""}:${s.native_id || s.cli_session || s.oc_id || s.hm_id || ""}`;
 }
 
 function renderSessions() {
@@ -701,7 +727,7 @@ function renderSessions() {
 }
 
 async function togglePin(item) {
-  const native = item?.native_id || item?.cli_session || item?.oc_id;
+  const native = item?.native_id || item?.cli_session || item?.oc_id || item?.hm_id;
   if (!native || !item.agent) return;
   const next = !item.pinned;
   try {
@@ -739,7 +765,7 @@ async function hideClosed(item) {
       state.searchHits = state.searchHits.filter((s) => nativePair(s) !== key);
     }
     const cur = state.session;
-    const curNative = cur?.native_id || cur?.cli_session || cur?.oc_id || "";
+    const curNative = cur?.native_id || cur?.cli_session || cur?.oc_id || cur?.hm_id || "";
     if (cur && !cur.live && cur.agent === item.agent && curNative === item.native_id) {
       clearMain();
     } else {
@@ -817,6 +843,9 @@ async function loadHealth() {
       h.tmux ? "tmux ok" : "tmux missing",
       h.opencode_serve ? "opencode serve" : h.opencode ? "opencode idle" : "no opencode",
     ];
+    if (h.hermes_enabled) {
+      bits.push(h.hermes ? "hermes ok" : "hermes down");
+    }
     $("health").textContent = bits.join(" · ");
   } catch (err) {
     $("health").textContent = String(err.message || err);
@@ -880,7 +909,9 @@ function renderMessages(messages) {
       ? "This session is closed. Send a message to resume it."
       : state.session?.agent === "opencode"
         ? "Session is up. Send a message — it goes to OpenCode over HTTP."
-        : "Waiting for the CLI transcript… send a message, bubbles show up here.";
+        : state.session?.agent === "hermes"
+          ? "Session is up. Send a message — it goes to the Hermes gateway."
+          : "Waiting for the CLI transcript… send a message, bubbles show up here.";
     log.appendChild(empty);
     return;
   }
@@ -1230,7 +1261,7 @@ async function peekHistory(item) {
 }
 
 async function wakeClosed(peek) {
-  if (!peek?.native_id && !peek?.cli_session && !peek?.oc_id) return null;
+  if (!peek?.native_id && !peek?.cli_session && !peek?.oc_id && !peek?.hm_id) return null;
   savePrefs();
   setStatus("");
   $("btn-send").disabled = true;
@@ -1240,7 +1271,7 @@ async function wakeClosed(peek) {
       body: JSON.stringify({
         agent: peek.agent,
         cwd: peek.cwd,
-        resume: peek.native_id || peek.cli_session || peek.oc_id,
+        resume: peek.native_id || peek.cli_session || peek.oc_id || peek.hm_id,
         model: $("model").value,
         effort: $("effort").value,
         fast: $("fast").checked,
@@ -1618,7 +1649,9 @@ $("btn-stop").addEventListener("click", async () => {
   const stopMsg =
     state.session.agent === "opencode"
       ? "Close this OpenCode session in wrap? It stays in OpenCode history."
-      : "Stop this session? The CLI process exits. Other sessions stay up.";
+      : state.session.agent === "hermes"
+        ? "Close this Hermes session in wrap? It stays in Hermes history."
+        : "Stop this session? The CLI process exits. Other sessions stay up.";
   if (!confirm(stopMsg)) return;
   try {
     await api(`/api/sessions/${state.session.id}`, { method: "DELETE" });

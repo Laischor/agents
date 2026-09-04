@@ -30,8 +30,8 @@ CURSOR_API_KEY=
 ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 GOOGLE_API_KEY=
-HERMES=0            # set to 1 to start the Hermes Agent container
-FIRECRAWL=0         # set to 1 to start the scrape API container (:3002)
+HERMES=0            # set to 1 to start Hermes + Firecrawl (Molx)
+FIRECRAWL=0         # set to 1 to start Molx without Hermes (:3002)
 COLIMA_MEMORY=4     # Colima VM RAM in GiB (when start.sh starts Colima)
 AGENTS_MEM_LIMIT=3g # agents container mem_limit
 ```
@@ -66,7 +66,7 @@ dagent       # Cursor CLI
 dpi          # Pi
 dclaude      # Claude Code (Anthropic)
 dopencode    # OpenCode
-dwrap        # wrap URL (native CLI sessions at :3780)
+dwrap        # wrap URL (native CLI sessions at :3000)
 dhermes      # Hermes Agent CLI (requires HERMES=1)
 agents-shell
 ```
@@ -82,25 +82,26 @@ The launcher starts the container if needed and sets the working directory 1:1 t
 | Claude Code | tmux session + `~/.claude/projects/…/*.jsonl` | none |
 | Cursor CLI | tmux session + `~/.cursor/projects/…/agent-transcripts/` | none |
 | OpenCode | `opencode serve` HTTP API (same backend as the TUI) | none |
+| Hermes | Gateway API on `:8642` (only when `HERMES=1`) | none |
 
-The container starts wrap on `0.0.0.0:3780` (host: `http://127.0.0.1:3780`). Pick a project, choose model/effort, then **New** — several sessions per project and agent can run in parallel. A message is pasted into that session's live TUI (or posted to OpenCode). Chat bubbles come from the CLI's own transcript, not a second agent.
+The container starts wrap on `0.0.0.0:3000` (host: `http://127.0.0.1:3000`). Pick a project, choose model/effort, then **New** — several sessions per project and agent can run in parallel. A message is pasted into that session's live TUI (or posted to OpenCode / the Hermes gateway). Chat bubbles come from the CLI's own transcript, not a second agent.
 
 Pin a session with the thumbtack in the sidebar — pinned sessions stay at the top of the list after wrap restarts, even when they are closed.
 
 ```bash
-open http://127.0.0.1:3780
+open http://127.0.0.1:3000
 agents wrap                 # print URL if already up
 ```
 
-TUI permission prompts show **Yes** / **No** in the chat when they appear (or open the **TUI** pane). **Stop** kills that tmux process only. OpenCode sessions stay in `opencode.db` (Stop does not delete them).
+TUI permission prompts show **Yes** / **No** in the chat when they appear (or open the **TUI** pane). **Stop** kills that tmux process only. OpenCode and Hermes sessions stay in their own history (Stop does not delete them).
 
 Set `AGENTS_WRAP_SERVE=0` in `.env` to skip auto-start. Recreate `agents` from the **host** after this change (`./start.sh`) so the image has `tmux` and the port mapping.
 
 ## GitHub CLI (`gh`)
 
-On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/.config/gh/hosts.yml`. Mounting that directory into Linux is not enough — and for Hermes it is harmful: the Docker sandbox bind-mounts a persist dir over `/root`, so a token-less host `~/.config/gh` hides any in-container login after a restart.
+On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/.config/gh/hosts.yml`. Mounting that directory into Linux is not enough.
 
-`./start.sh` and `run.sh` call `gh auth token` on the host and write a Linux gh config (with `oauth_token`) plus a git credential helper into `data/gh/` and `data/gitconfig` (gitignored). Those files are mounted **read-only** into `agents`, the Hermes gateway (`/opt/data/.config/gh`), and the Hermes sandbox (`/root/.config/gh` and `/root/.gitconfig`). `config.yml` includes `version: "1"` so `gh` ≥2.40 does not try to migrate (and fatal) on the `:ro` mount. They also set `GH_TOKEN` / `GITHUB_TOKEN` on the containers and in `data/hermes/.env`. `./start.sh` removes leftover Hermes sandbox containers so the new mounts apply (volume mounts are frozen at `docker run`). Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
+`./start.sh` and `run.sh` call `gh auth token` on the host and write a Linux gh config (with `oauth_token`) plus a git credential helper into `data/gh/` and `data/gitconfig` (gitignored). Those files are mounted **read-only** into `agents` and the Hermes gateway (`/opt/data/.config/gh`, `/opt/data/.gitconfig`). `config.yml` includes `version: "1"` so `gh` ≥2.40 does not try to migrate (and fatal) on the `:ro` mount. They also set `GH_TOKEN` / `GITHUB_TOKEN` on the containers and in `data/hermes/.env`. Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
 
 Git in the container uses `/etc/gitconfig` for `safe.directory *` and `credential.helper = !gh auth git-credential`. Host `~/.gitconfig` is mounted at `/etc/gitconfig.host` (read-only) so only `user.name` / `user.email` are copied into the container — not macOS credential helpers that clear the chain or point at `/opt/homebrew/bin/gh`. On the host you can use the same pathless helper: `helper = !gh auth git-credential`.
 
@@ -176,7 +177,7 @@ godot --version
 
 Security: only `blender` and `godot` are allowlisted; `cwd` and path-like args must stay under `HOST_PROJECTS`; one job at a time; per-job timeout. Jobs left in `data/gpu/running/` after a crash are marked error on the next daemon start.
 
-In the Hermes sandbox (`/workspace`), shims map cwd back to `$HOST_PROJECTS/…` when `HOST_PROJECTS` is set; prefer absolute paths under `HOST_PROJECTS` for args. Override cwd with `GPU_JOB_CWD=…` if needed.
+Prefer absolute paths under `HOST_PROJECTS` for args. Override cwd with `GPU_JOB_CWD=…` if needed.
 
 Rebuild/recreate `agents` from the **host** after this change (`./start.sh` or `docker compose build agents && docker compose up -d agents`) so the image includes the shims and the `data/gpu` mount.
 
@@ -196,30 +197,30 @@ agents hermes-setup
 dhermes
 ```
 
-With `HERMES=1`, Compose starts the gateway, [Open WebUI](https://github.com/open-webui/open-webui) chat, and SearxNG:
+With `HERMES=1`, Compose starts the gateway and [Molx](https://github.com/ioi-labs/molx) as the Firecrawl-compatible `web_search` / `web_extract` backend:
 
 | Surface | URL | Role |
 |---------|-----|------|
-| **Open WebUI** | `http://127.0.0.1:3000` | Web chat frontend (first user = admin) |
-| **Dashboard** | `http://127.0.0.1:9119` | Config / monitoring (`HERMES_DASHBOARD=1`) |
+| **Dashboard** | `http://127.0.0.1:9119` | Chat / config / monitoring (`HERMES_DASHBOARD=1`) |
 | Gateway API | `localhost:8642` | Agent runtime + OpenAI-compatible API |
+| **Firecrawl (Molx)** | `http://127.0.0.1:3002` | Search + extract (`FIRECRAWL_API_URL`) |
 
-**Architecture:** Open WebUI talks to Hermes' OpenAI-compatible API (`OPENAI_API_BASE_URL=http://hermes:8642/v1`), so tools, memory, cron, and the `agents:local` Docker sandbox stay on the gateway — Open WebUI is only the browser UI. Requires `API_SERVER_ENABLED` + `HERMES_API_SERVER_KEY` (auto-generated by `./start.sh` if empty; also used as Open WebUI's `OPENAI_API_KEY`). See [Hermes ↔ Open WebUI](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/open-webui).
+**Architecture:** Hermes runs **its own model** with a **local** terminal (shell/file/`execute_code` inside the `hermes` container). Chat is the dashboard, `dhermes` CLI, and wrap (Agent dropdown when `HERMES=1`). It does **not** spawn `agents:local` or hand work off to Cursor / Claude Code / Pi / OpenCode. Requires `API_SERVER_ENABLED` + `HERMES_API_SERVER_KEY` (auto-generated by `./start.sh` if empty).
 
-Docker requires dashboard basic auth — `./start.sh` writes `HERMES_DASHBOARD_USER` / `HERMES_DASHBOARD_PASSWORD` / `HERMES_DASHBOARD_SECRET` into `.env` if missing. Hermes state lives in `data/hermes/` (`/opt/data` in the gateway); Open WebUI state in `data/open-webui/`. `HERMES_WRITE_SAFE_ROOT` is `/opt/data:${HOST_PROJECTS}` so `write_file`/`patch` can touch Hermes state and the mounted project tree. Setting `HERMES=0` and running `./start.sh` again stops hermes, open-webui, and searxng.
+Docker requires dashboard basic auth — `./start.sh` writes `HERMES_DASHBOARD_USER` / `HERMES_DASHBOARD_PASSWORD` / `HERMES_DASHBOARD_SECRET` into `.env` if missing. Hermes state lives in `data/hermes/` (`/opt/data` in the gateway). `HERMES_WRITE_SAFE_ROOT` is `/opt/data:${HOST_PROJECTS}` so `write_file`/`patch` can touch Hermes state and the mounted project tree. Setting `HERMES=0` and running `./start.sh` again stops hermes and firecrawl (unless `FIRECRAWL=1`).
 
 ## Firecrawl
 
-Optional scrape API. Disabled by default — only starts when `FIRECRAWL=1` in `.env` (Compose profile `firecrawl`).
+Self-hosted scrape/search API. Official [Firecrawl OSS](https://docs.firecrawl.dev/contributing/self-host) is a five-container stack (API, Playwright, Redis, RabbitMQ, Postgres). This repo runs a **single** [Molx](https://github.com/ioi-labs/molx) container instead — Firecrawl-shaped `/v2/scrape` plus native search, no queue/browser sidecars.
 
-Official [Firecrawl OSS](https://docs.firecrawl.dev/contributing/self-host) is a five-container stack (API, Playwright, Redis, RabbitMQ, Postgres). This repo runs a **single** [Molx](https://github.com/ioi-labs/molx) container instead — same `/v2/scrape` shape, no queue/browser sidecars.
+Starts automatically with `HERMES=1` (Hermes web tools). Without Hermes, set `FIRECRAWL=1`:
 
 ```bash
 # In .env: FIRECRAWL=1
 ./start.sh
 ```
 
-The API is localhost-only (`127.0.0.1:3002`). Auth is off unless you set `FIRECRAWL_API_KEY`.
+The API is localhost-only (`127.0.0.1:3002`). Auth is off unless you set `FIRECRAWL_API_KEY`. Hermes is pinned to this instance (`FIRECRAWL_API_URL=http://firecrawl:3002`, `web.backend: firecrawl` in `data/hermes/config.yaml`).
 
 | Surface | URL | Role |
 |---------|-----|------|
@@ -233,11 +234,13 @@ curl -sS -X POST http://127.0.0.1:3002/v2/scrape \
   -d '{"url":"https://example.com","formats":["markdown"]}'
 ```
 
-Search is built in (no SearxNG). Optional LLM extract uses `OPENAI_API_KEY` + `FIRECRAWL_MODEL_NAME`. Setting `FIRECRAWL=0` and running `./start.sh` again stops the container.
+Search is built into Molx. Optional LLM extract uses `OPENAI_API_KEY` + `FIRECRAWL_MODEL_NAME`. Setting `FIRECRAWL=0` with `HERMES=0` and running `./start.sh` again stops the container.
 
-### Terminal sandbox (`agents:local`)
+### Terminal (local)
 
-Hermes runs with `terminal.backend: docker` and image `agents:local`. Shell / file / code tools execute in a long-lived sandbox that has **Claude Code**, **Cursor CLI** (`agent`), **Pi**, **OpenCode**, and **`gh`** on `PATH`, with the same auth mounts as the `agents` service (`data/claude`, `data/cursor`, `data/opencode`, `~/.config/gh`, …). The directory you launch from is mounted at `/workspace` inside the sandbox. Hermes needs the host Docker socket for this; `./start.sh` also writes `AGENTS_DIR` into `.env` so bind-mount paths resolve.
+Hermes uses `terminal.backend: local` (`TERMINAL_ENV=local`). Shell, file, and `execute_code` tools run **inside the `hermes` container** — not in `agents:local`, and without Cursor CLI / Claude Code on `PATH`. Coding agents stay in the separate `agents` service (`dagent` / `dclaude` / …).
+
+`HOST_PROJECTS` is bind-mounted so `write_file` / `patch` can touch the project tree (`HERMES_WRITE_SAFE_ROOT=/opt/data:/tmp:${HOST_PROJECTS}`). There is no Docker socket on the gateway.
 
 ## Persistence
 
@@ -247,8 +250,8 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 |-------------------|----------------------|
 | `~/.gitconfig`         | `/etc/gitconfig.host` (read-only; identity only) |
 | `~/.ssh/`              | `/root/.ssh` (read-only, GitHub SSH) |
-| `data/gitconfig`       | `agents` / Hermes sandbox: `/root/.gitconfig`; Hermes gateway: `/opt/data/.gitconfig` (identity + `gh auth git-credential`) |
-| `data/gh/`             | `agents` / Hermes sandbox: `/root/.config/gh`; Hermes gateway: `/opt/data/.config/gh` (Linux hosts.yml with token) |
+| `data/gitconfig`       | Hermes gateway: `/opt/data/.gitconfig` (identity + `gh auth git-credential`) |
+| `data/gh/`             | `agents`: `/root/.config/gh`; Hermes gateway: `/opt/data/.config/gh` (Linux hosts.yml with token) |
 | `data/cursor/`         | `/root/.cursor`         |
 | `data/cursor-config/`  | `/root/.config/cursor` (login tokens) |
 | `data/pi/`             | `/root/.pi`             |
@@ -259,13 +262,12 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 | `data/gpu/`            | `/var/agents-gpu` (host Blender/Godot job queue via gpu-bridge) |
 | `data/cmux/`           | `/var/agents-cmux` (host cmux notify/hooks queue via cmux-bridge) |
 | `data/hermes/`         | Hermes home: gateway `/opt/data` |
-| `data/open-webui/`     | Open WebUI app data (`/app/backend/data`) |
 
 `data/` and `.env` are gitignored.
 
 ## Process hygiene (long-lived container)
 
-The `agents` container stays up for many `compose exec` / Hermes sessions. Each session can leave behind child processes or zombies. Compose enables:
+The `agents` container stays up for many `compose exec` sessions. Each session can leave behind child processes or zombies. Compose enables:
 
 - **`init: true`** — Docker’s tini as PID 1 reaps zombies
 - **`mem_limit`** — hard memory cap so thrash cannot freeze the whole container (default `3g` via `AGENTS_MEM_LIMIT`; Colima default `4g` via `COLIMA_MEMORY`)

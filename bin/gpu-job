@@ -61,21 +61,6 @@ submit_job() {
     log "warning: gpu-bridge heartbeat missing/stale — start on host: agents gpu-bridge --daemon"
   fi
   local cwd="${GPU_JOB_CWD:-${PWD:-/}}"
-  # Hermes sandbox uses /workspace; prefer host-identical path when available
-  if [[ "$cwd" == /workspace || "$cwd" == /workspace/* ]]; then
-    if [[ -n "${HOST_PROJECTS:-}" && -d "${HOST_PROJECTS}" ]]; then
-      local rel="${cwd#/workspace}"
-      rel="${rel#/}"
-      if [[ -n "$rel" ]]; then
-        cwd="${HOST_PROJECTS}/${rel}"
-      else
-        cwd="${HOST_PROJECTS}"
-      fi
-    else
-      log "error: cwd is /workspace but HOST_PROJECTS is unset — cd to a path under HOST_PROJECTS or set GPU_JOB_CWD"
-      exit 1
-    fi
-  fi
   local id
   id="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 

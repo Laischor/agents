@@ -7,7 +7,7 @@ set -u
 PID_FILE="${AGENTS_WRAP_PID_FILE:-/var/run/wrap-serve.pid}"
 LOG_FILE="${AGENTS_WRAP_LOG:-/var/log/wrap-serve.log}"
 HOST="${WRAP_HOST:-0.0.0.0}"
-PORT="${WRAP_PORT:-3780}"
+PORT="${WRAP_PORT:-3000}"
 WRAP_ROOT="${WRAP_ROOT:-/usr/local/share/wrap}"
 
 log() {
@@ -48,6 +48,7 @@ export WRAP_PORT="$PORT"
 export WRAP_ROOT
 # Leave default OpenCode serve on :4096.
 export WRAP_OPENCODE_PORT="${WRAP_OPENCODE_PORT:-4097}"
+export WRAP_HERMES_URL="${WRAP_HERMES_URL:-http://hermes:8642}"
 export PYTHONUNBUFFERED=1
 
 log "wrap start host=$HOST port=$PORT root=$WRAP_ROOT cwd=$(pwd)"

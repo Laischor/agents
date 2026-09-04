@@ -13,7 +13,7 @@ USER_QUERY_RE = re.compile(r"<user_query>\s*([\s\S]*?)\s*</user_query>")
 TIMESTAMP_RE = re.compile(r"<timestamp>[\s\S]*?</timestamp>\s*")
 COMMAND_NAME_RE = re.compile(r"<command-name>([^<]+)</command-name>")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
-WRAP_DEFAULT_TITLE_RE = re.compile(r" · (claude|cursor|opencode)( · |$)", re.I)
+WRAP_DEFAULT_TITLE_RE = re.compile(r" · (claude|cursor|opencode|hermes)( · |$)", re.I)
 HARNESS_USER_TAG_RE = re.compile(
     r"^<(dynamic_tools|dynamic_tool_namespaces|system_notification|"
     r"agent_transcripts|user_info|git_status|agent_skills|"

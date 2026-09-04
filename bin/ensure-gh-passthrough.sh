@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 # Write a Linux gh config + git credential helper into data/ so containers
 # keep GitHub auth across restarts. macOS stores the OAuth token in Keychain;
-# mounting ~/.config/gh is not enough — and on Hermes it is actively wrong:
-# the sandbox bind-mounts a persist dir over /root, so a token-less host
-# ~/.config/gh hides any in-container setup.
+# mounting ~/.config/gh is not enough.
 #
 # Source from start.sh / run.sh after AGENTS_DIR is set.
 #   source "$AGENTS_DIR/bin/ensure-gh-passthrough.sh"
 #   ensure_gh_passthrough
-#   reap_hermes_sandboxes   # only when recreating the Hermes stack
 
 ensure_gh_passthrough() {
   local gh_dir="$AGENTS_DIR/data/gh"
@@ -70,10 +67,6 @@ PY
   printf '%s\n' 'git_protocol: https' 'version: "1"' >"$gh_dir/config.yml"
 
   if command -v hermes_enabled >/dev/null 2>&1 && hermes_enabled; then
-    mkdir -p "$AGENTS_DIR/data/hermes/home/.config/gh"
-    cp -a "$gh_dir/." "$AGENTS_DIR/data/hermes/home/.config/gh/"
-    chmod 700 "$AGENTS_DIR/data/hermes/home/.config/gh" 2>/dev/null || true
-    cp "$gitconfig_file" "$AGENTS_DIR/data/hermes/home/.gitconfig"
     _upsert_dotenv_key "$AGENTS_DIR/data/hermes/.env" GH_TOKEN "$GH_TOKEN"
     _upsert_dotenv_key "$AGENTS_DIR/data/hermes/.env" GITHUB_TOKEN "$GITHUB_TOKEN"
   fi
@@ -89,15 +82,4 @@ _upsert_dotenv_key() {
   printf '%s=%s\n' "$key" "$value" >>"$tmp"
   mv "$tmp" "$file"
   chmod 600 "$file" 2>/dev/null || true
-}
-
-# Hermes reuses sandbox containers by label; volume mounts are frozen at
-# `docker run`. Drop them so the next tool call picks up data/gh + gitconfig.
-reap_hermes_sandboxes() {
-  command -v docker >/dev/null 2>&1 || return 0
-  local ids
-  ids="$(docker ps -aq --filter label=hermes-agent=1 2>/dev/null || true)"
-  [[ -n "$ids" ]] || return 0
-  # shellcheck disable=SC2086
-  docker rm -f $ids >/dev/null 2>&1 || true
 }

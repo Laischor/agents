@@ -8,7 +8,7 @@ AGENTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_FILE="$AGENTS_DIR/docker-compose.yml"
 SERVICE="agents"
 
-# Keep AGENTS_DIR in .env so compose can interpolate Hermes docker_volumes
+# Keep AGENTS_DIR in .env so compose and helpers can resolve this repo path
 if [[ -f "$AGENTS_DIR/.env" ]]; then
   if grep -q '^AGENTS_DIR=' "$AGENTS_DIR/.env" 2>/dev/null; then
     tmp="$(mktemp)"
@@ -17,7 +17,7 @@ if [[ -f "$AGENTS_DIR/.env" ]]; then
   else
     {
       printf '\n'
-      printf '# Absolute path to this repo (Hermes sandbox bind mounts)\n'
+      printf '# Absolute path to this repo\n'
       printf 'AGENTS_DIR=%s\n' "$AGENTS_DIR"
     } >> "$AGENTS_DIR/.env"
   fi
@@ -85,12 +85,11 @@ ensure_services() {
     "$AGENTS_DIR/data/wrap"
   local compose_args=()
   if hermes_enabled; then
-    mkdir -p "$AGENTS_DIR/data/hermes" "$AGENTS_DIR/data/open-webui"
+    mkdir -p "$AGENTS_DIR/data/hermes"
     ensure_gh_passthrough
-    reap_hermes_sandboxes
     compose_args+=(--profile hermes)
   fi
-  if firecrawl_enabled; then
+  if firecrawl_enabled || hermes_enabled; then
     compose_args+=(--profile firecrawl)
   fi
   "${COMPOSE[@]}" "${compose_args[@]}" up -d --quiet-pull
@@ -255,9 +254,9 @@ case "$cmd" in
       "$SERVICE" "$cmd" "$@"
     ;;
   wrap)
-    wrap_public="${WRAP_PUBLIC_URL:-http://127.0.0.1:3780}"
+    wrap_public="${WRAP_PUBLIC_URL:-http://127.0.0.1:3000}"
     if [[ $# -eq 0 || "${1:-}" == "serve" ]]; then
-      if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:3780/" 2>/dev/null; then
+      if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:3000/" 2>/dev/null; then
         printf 'Wrap (native sessions) already running: %s\n' "$wrap_public"
         exit 0
       fi

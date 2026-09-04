@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 
 REAL = os.environ.get("CMUX_REAL", "/usr/local/bin/cmux.agents-host")
-WRAP_URL = os.environ.get("WRAP_URL", "http://127.0.0.1:3780").rstrip("/")
+WRAP_URL = os.environ.get("WRAP_URL", "http://127.0.0.1:3000").rstrip("/")
 
 
 def in_wrap() -> bool:

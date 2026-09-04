@@ -2,7 +2,7 @@
 """Native-session web wrap: tmux + transcripts (Claude/Cursor), OpenCode HTTP API.
 
 No extra model harness — Claude/Cursor stay on the live CLI; OpenCode uses
-`opencode serve` REST + SSE (the same surface as the TUI).
+`opencode serve` REST + SSE. Hermes (when HERMES=1) uses the gateway API.
 """
 
 from __future__ import annotations
@@ -29,18 +29,25 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import hermes as hm  # noqa: E402
 import opencode as oc  # noqa: E402
 import transcripts as tr  # noqa: E402
 
 HOST = os.environ.get("WRAP_HOST", "0.0.0.0")
-PORT = int(os.environ.get("WRAP_PORT", "3780"))
+PORT = int(os.environ.get("WRAP_PORT", "3000"))
 HOST_PROJECTS = Path(os.environ.get("HOST_PROJECTS", "/Users/mr/projects")).resolve()
 CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
 CURSOR_HOME = Path.home() / ".cursor"
 TMUX_SOCK = os.environ.get("WRAP_TMUX_SOCK", "/tmp/wrap.tmux.sock")
 STATIC = ROOT / "static"
 STATE_PATH = Path(os.environ.get("WRAP_STATE", "/var/lib/wrap/state.json"))
-AGENTS = ("claude", "cursor", "opencode")
+AGENTS = ("claude", "cursor", "opencode", "hermes")
+AGENT_LABELS = {
+    "claude": "Claude",
+    "cursor": "Cursor",
+    "opencode": "OpenCode",
+    "hermes": "Hermes",
+}
 # Status-line only. Avoid matching chat text ("thinking") or Claude's idle "⏵⏵ auto mode".
 BUSY_RE = re.compile(
     r"esc to interrupt|esc to cancel|ctrl\+c to interrupt|ctrl\+c to stop|"
@@ -118,6 +125,19 @@ _alert_timer_lock = threading.Lock()
 def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     print(f"{ts} {msg}", flush=True)
+
+
+def hermes_on() -> bool:
+    return hm.enabled()
+
+
+def http_live(sess: dict[str, Any]) -> bool:
+    agent = sess.get("agent")
+    if agent == "opencode":
+        return bool(sess.get("oc_id"))
+    if agent == "hermes":
+        return bool(sess.get("hm_id"))
+    return False
 
 
 def new_session_id(agent: str) -> str:
@@ -475,6 +495,8 @@ def session_recently_wrote(sess: dict[str, Any], sec: float = ALERT_SETTLE_SEC) 
     """True if the native transcript was just written — another round may be incoming."""
     if sess.get("agent") == "opencode":
         return False
+    if sess.get("agent") == "hermes":
+        return False
     raw = sess.get("transcript")
     path = Path(raw) if raw else pick_transcript(sess)
     if not path or not path.is_file():
@@ -504,6 +526,8 @@ def session_is_working(sess: dict[str, Any], pane: str = "", *, hold: bool = Tru
         busy = busy or pane_busy(text)
     elif sess.get("agent") == "opencode" and sess.get("oc_id"):
         busy = busy or oc.session_busy(str(sess["oc_id"]), sess.get("cwd") or "")
+    elif sess.get("agent") == "hermes" and sess.get("hm_id"):
+        busy = busy or hm.session_busy(str(sess["hm_id"]))
     if not busy and sess.get("agent") == "claude":
         raw = sess.get("transcript")
         path = Path(raw) if raw else pick_transcript(sess)
@@ -519,6 +543,8 @@ def session_is_working(sess: dict[str, Any], pane: str = "", *, hold: bool = Tru
 def session_subagents(sess: dict[str, Any]) -> list[dict[str, Any]]:
     if sess.get("agent") == "opencode" and sess.get("oc_id"):
         return oc.subagents(str(sess["oc_id"]), sess.get("cwd") or "")
+    if sess.get("agent") == "hermes":
+        return []
     if sess.get("agent") != "claude":
         return []
     raw = sess.get("transcript")
@@ -659,6 +685,8 @@ def session_choice(sess: dict[str, Any], pane: str | None = None) -> dict[str, A
     agent = str(sess.get("agent") or "")
     if agent == "opencode" and sess.get("oc_id"):
         return oc.pending_choice(str(sess["oc_id"]), sess.get("cwd") or "")
+    if agent == "hermes":
+        return None
     if agent not in ("claude", "cursor"):
         return None
     text = ""
@@ -743,6 +771,7 @@ def persist_state() -> None:
             "sessions": list(SESSIONS.values()),
             "hidden": sorted(HIDDEN),
             "pinned": list(PINNED),
+            "hermes_cwd": hm.cwd_map(),
         }
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
@@ -761,6 +790,9 @@ def load_state() -> None:
     items = data.get("sessions")
     hidden = data.get("hidden")
     pinned = data.get("pinned")
+    hermes_cwd = data.get("hermes_cwd")
+    if isinstance(hermes_cwd, dict):
+        hm.load_cwd_map({str(k): str(v) for k, v in hermes_cwd.items() if k and v})
     with _lock:
         HIDDEN.clear()
         PINNED.clear()
@@ -780,6 +812,8 @@ def load_state() -> None:
             if not isinstance(sess, dict) or not sess.get("id"):
                 continue
             SESSIONS[str(sess["id"])] = sess
+            if sess.get("agent") == "hermes" and sess.get("hm_id") and sess.get("cwd"):
+                hm.remember_cwd(str(sess["hm_id"]), str(sess["cwd"]))
 
 
 def session_meta(sess: dict[str, Any]) -> dict[str, Any]:
@@ -789,6 +823,7 @@ def session_meta(sess: dict[str, Any]) -> dict[str, Any]:
         "cwd": sess["cwd"],
         "tmux": sess.get("tmux"),
         "oc_id": sess.get("oc_id"),
+        "hm_id": sess.get("hm_id"),
         "transcript": sess.get("transcript"),
         "title": sess.get("title") or "",
         "model": sess.get("model") or "",
@@ -796,7 +831,7 @@ def session_meta(sess: dict[str, Any]) -> dict[str, Any]:
         "fast": bool(sess.get("fast")),
         "created": sess.get("created") or "",
         "cli_session": sess.get("cli_session") or "",
-        "native_id": sess.get("oc_id") or sess.get("cli_session") or "",
+        "native_id": sess.get("hm_id") or sess.get("oc_id") or sess.get("cli_session") or "",
     }
 
 
@@ -818,11 +853,13 @@ def apply_native_title(
     native = ""
     if sess.get("agent") == "opencode" and sess.get("oc_id"):
         native = oc.inferred_title(str(sess["oc_id"]), sess.get("cwd") or "")
+    elif sess.get("agent") == "hermes" and sess.get("hm_id"):
+        native = hm.inferred_title(str(sess["hm_id"]), sess.get("cwd") or "")
     elif sess.get("tmux") and tmux_has(str(sess["tmux"])):
         pane_title = tmux_pane_title(str(sess["tmux"]))
         if pane_title and not tr.is_wrap_default_title(pane_title):
             native = pane_title
-    if not native and sess.get("agent") != "opencode":
+    if not native and sess.get("agent") not in ("opencode", "hermes"):
         path = sess.get("transcript")
         native = tr.native_session_title(
             str(sess.get("agent") or ""),
@@ -990,6 +1027,26 @@ def oc_send_text(sess: dict[str, Any], text: str) -> None:
     )
 
 
+def hermes_send_text(sess: dict[str, Any], text: str) -> None:
+    hm_id = sess.get("hm_id")
+    if not hm_id:
+        raise RuntimeError("no hermes session")
+    cwd = Path(sess["cwd"])
+    # Hermes CLI default busy_input_mode is interrupt: a follow-up while
+    # working redirects the turn. wrap used to wait_idle (queue-until-done).
+    if hm.session_busy(str(hm_id)):
+        log(f"hermes interrupt {hm_id} for queued send")
+        hm.abort(str(hm_id))
+    hm.wait_idle(str(hm_id), timeout=30.0)
+    hm.prompt_async(
+        str(hm_id),
+        cwd,
+        text,
+        model=str(sess.get("model") or ""),
+        effort=str(sess.get("effort") or ""),
+    )
+
+
 def enqueue_send(sid: str, text: str) -> None:
     with _lock:
         q = _send_q.get(sid)
@@ -1019,6 +1076,9 @@ def _drain_sends(sid: str) -> None:
         try:
             if sess["agent"] == "opencode":
                 oc_send_text(sess, text)
+                continue
+            if sess["agent"] == "hermes":
+                hermes_send_text(sess, text)
                 continue
             name = sess.get("tmux")
             if not name or not tmux_has(name):
@@ -1114,7 +1174,7 @@ def claimed_transcripts(except_sid: str | None = None) -> set[str]:
 def pick_transcript(sess: dict[str, Any]) -> Path | None:
     """Bind only a jsonl this wrap session created (or resumed), never a sibling's."""
     agent = sess["agent"]
-    if agent == "opencode":
+    if agent in ("opencode", "hermes"):
         return None
     cwd = Path(sess["cwd"])
     seen = sess.get("seen_transcripts") or {}
@@ -1147,7 +1207,7 @@ def pick_transcript(sess: dict[str, Any]) -> Path | None:
 
 
 def ensure_transcript(sess: dict[str, Any]) -> Path | None:
-    if sess.get("agent") == "opencode":
+    if sess.get("agent") in ("opencode", "hermes"):
         return None
     found = pick_transcript(sess)
     if not found:
@@ -1230,8 +1290,16 @@ def catalog() -> dict[str, Any]:
     oc_models = oc.providers(HOST_PROJECTS if HOST_PROJECTS.is_dir() else None)
     if len(oc_models) <= 1:
         oc_models.extend(parse_labeled_models(run_lines(["opencode", "models"])))
+    hermes_models = [{"id": "", "label": "Gateway default"}]
+    if hermes_on():
+        try:
+            hermes_models = hm.providers() or hermes_models
+        except RuntimeError as exc:
+            log(f"hermes models: {exc}")
 
+    agents = [{"id": key, "label": AGENT_LABELS[key]} for key in AGENTS if key != "hermes" or hermes_on()]
     data = {
+        "agents": agents,
         "claude": {
             "models": CLAUDE_MODELS,
             "effort": EFFORT_LEVELS,
@@ -1252,6 +1320,12 @@ def catalog() -> dict[str, Any]:
             "fast": False,
         },
     }
+    if hermes_on():
+        data["hermes"] = {
+            "models": hermes_models,
+            "effort": EFFORT_LEVELS,
+            "fast": False,
+        }
     with _catalog_lock:
         _catalog_cache["at"] = now
         _catalog_cache["data"] = data
@@ -1300,9 +1374,7 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
         pane = tmux_capture(sess["tmux"])
         cmd = tmux_alive_command(sess["tmux"])
     messages = load_messages(sess)
-    live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or (
-        sess["agent"] == "opencode" and bool(sess.get("oc_id"))
-    )
+    live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or http_live(sess)
     subagents = session_subagents(sess)
     choice = session_choice(sess, pane)
     busy = session_is_working(sess, pane) or bool(subagents) or bool(choice)
@@ -1325,6 +1397,11 @@ def load_messages(sess: dict[str, Any]) -> list[dict[str, Any]]:
         if not oc_id:
             return []
         return oc.list_messages(str(oc_id), sess.get("cwd") or "")
+    if sess["agent"] == "hermes":
+        hm_id = sess.get("hm_id")
+        if not hm_id:
+            return []
+        return hm.list_messages(str(hm_id)) or []
     path = ensure_transcript(sess)
     if not path:
         return []
@@ -1342,6 +1419,14 @@ def fingerprint(sess: dict[str, Any]) -> str:
         return (
             f"oc:{oc_id}:{len(msgs)}:{last.get('id')}:{len(last.get('text') or '')}:"
             f"{int(oc.session_busy(oc_id, cwd))}:{cid}:{sess.get('title') or ''}"
+        )
+    if sess["agent"] == "hermes":
+        hm_id = str(sess.get("hm_id") or "")
+        msgs = load_messages(sess)
+        last = msgs[-1] if msgs else {}
+        return (
+            f"hm:{hm_id}:{len(msgs)}:{last.get('id')}:{len(last.get('text') or '')}:"
+            f"{int(hm.session_busy(hm_id))}:{sess.get('title') or ''}"
         )
     path = ensure_transcript(sess)
     if not path:
@@ -1396,7 +1481,7 @@ def discover_tmux() -> None:
     dropped = False
     with _lock:
         for sid, sess in list(SESSIONS.items()):
-            if sess.get("agent") == "opencode":
+            if http_live(sess):
                 continue
             if sid not in found:
                 SESSIONS.pop(sid, None)
@@ -1421,6 +1506,8 @@ def native_key(sess: dict[str, Any]) -> tuple[str, str]:
     agent = str(sess.get("agent") or "")
     if agent == "opencode":
         return agent, str(sess.get("oc_id") or "")
+    if agent == "hermes":
+        return agent, str(sess.get("hm_id") or "")
     native = str(sess.get("cli_session") or "")
     if not native:
         path = str(sess.get("transcript") or "")
@@ -1445,6 +1532,8 @@ def find_live_native(agent: str, native_id: str, cwd: Path) -> dict[str, Any] | 
         if got != native_id:
             continue
         if agent == "opencode" and sess.get("oc_id"):
+            return sess
+        if agent == "hermes" and sess.get("hm_id"):
             return sess
         if sess.get("tmux") and tmux_has(str(sess["tmux"])):
             return sess
@@ -1518,30 +1607,30 @@ def set_pinned(agent: str, native_id: str, pinned: bool) -> list[str]:
     return out
 
 
-def live_native_skip() -> tuple[set[tuple[str, str]], set[str]]:
+def live_native_skip() -> tuple[set[tuple[str, str]], set[str], set[str]]:
     skip: set[tuple[str, str]] = set()
     with _lock:
         vals = list(SESSIONS.values())
     for sess in vals:
-        live = bool(sess.get("tmux") and tmux_has(str(sess.get("tmux") or ""))) or (
-            sess.get("agent") == "opencode" and bool(sess.get("oc_id"))
-        )
+        live = bool(sess.get("tmux") and tmux_has(str(sess.get("tmux") or ""))) or http_live(sess)
         if not live:
             continue
         key = native_key(sess)
         if key[1]:
             skip.add(key)
     oc_skip = {key[1] for key in skip if key[0] == "opencode"}
-    return skip, oc_skip
+    hm_skip = {key[1] for key in skip if key[0] == "hermes"}
+    return skip, oc_skip, hm_skip
 
 
 def list_history() -> list[dict[str, Any]]:
     projects = [Path(p["path"]) for p in list_projects()]
-    skip, oc_skip = live_native_skip()
+    skip, oc_skip, hm_skip = live_native_skip()
     pinned = history_pinned()
     hidden = history_hidden() - pinned
     skip |= hidden
     oc_skip |= {n for a, n in hidden if a == "opencode"}
+    hm_skip |= {n for a, n in hidden if a == "hermes"}
     keep = {key for key in pinned if key not in skip}
     cli = tr.list_native_history(
         projects,
@@ -1559,7 +1648,15 @@ def list_history() -> list[dict[str, Any]]:
         )
     except RuntimeError:
         oc_rows = []
-    merged = cli + oc_rows
+    try:
+        hm_rows = hm.history_rows(
+            projects,
+            skip=hm_skip,
+            keep={n for a, n in keep if a == "hermes"},
+        )
+    except RuntimeError:
+        hm_rows = []
+    merged = cli + oc_rows + hm_rows
     for item in merged:
         key = (str(item.get("agent") or ""), str(item.get("native_id") or ""))
         item["pinned"] = key in pinned
@@ -1593,7 +1690,7 @@ def _history_blob(item: dict[str, Any]) -> str:
 
 
 def _fill_history_title(item: dict[str, Any]) -> None:
-    if item.get("title") or str(item.get("agent") or "") == "opencode":
+    if item.get("title") or str(item.get("agent") or "") in ("opencode", "hermes"):
         return
     path = Path(item["transcript"]) if item.get("transcript") else None
     named = tr.native_session_title(
@@ -1612,11 +1709,12 @@ def search_history(query: str, limit: int = 40) -> list[dict[str, Any]]:
     if len(q) < 2:
         return []
     projects = [Path(p["path"]) for p in list_projects()]
-    skip, oc_skip = live_native_skip()
+    skip, oc_skip, hm_skip = live_native_skip()
     pinned = history_pinned()
     hidden = history_hidden() - pinned
     skip |= hidden
     oc_skip |= {n for a, n in hidden if a == "opencode"}
+    hm_skip |= {n for a, n in hidden if a == "hermes"}
     cli = tr.list_native_history(
         projects,
         claude_home=CLAUDE_HOME,
@@ -1630,7 +1728,11 @@ def search_history(query: str, limit: int = 40) -> list[dict[str, Any]]:
         oc_rows = oc.history_rows(projects, skip=oc_skip, limit=2000)
     except RuntimeError:
         oc_rows = []
-    merged = cli + oc_rows
+    try:
+        hm_rows = hm.history_rows(projects, skip=hm_skip, limit=2000)
+    except RuntimeError:
+        hm_rows = []
+    merged = cli + oc_rows + hm_rows
     merged.sort(key=lambda item: float(item.get("updated") or 0), reverse=True)
     registry = tr.claude_registry_names(CLAUDE_HOME)
     for item in merged:
@@ -1699,6 +1801,9 @@ def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
     if agent == "opencode":
         messages = oc.list_messages(native_id, cwd)
         title = oc.inferred_title(native_id, cwd)
+    elif agent == "hermes":
+        messages = hm.list_messages(native_id)
+        title = hm.inferred_title(native_id, cwd)
     else:
         path = history_transcript(agent, cwd, native_id)
         if not path:
@@ -1723,6 +1828,7 @@ def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
         "cwd": str(cwd),
         "tmux": None,
         "oc_id": native_id if agent == "opencode" else "",
+        "hm_id": native_id if agent == "hermes" else "",
         "transcript": transcript,
         "title": title,
         "model": "",
@@ -1754,6 +1860,8 @@ def open_session(
 ) -> dict[str, Any]:
     if agent not in AGENTS:
         raise ValueError(f"unknown agent: {agent}")
+    if agent == "hermes" and not hermes_on():
+        raise ValueError("Hermes is disabled — set HERMES=1 in .env")
     resume_id = (resume_id or "").strip()
     if resume_id:
         existing = find_live_native(agent, resume_id, cwd)
@@ -1772,6 +1880,34 @@ def open_session(
             "cwd": str(cwd),
             "tmux": None,
             "oc_id": oc_id,
+            "hm_id": None,
+            "transcript": None,
+            "title": title,
+            "model": model,
+            "effort": effort,
+            "fast": False,
+            "created": created,
+            "cli_session": "",
+        }
+        with _lock:
+            SESSIONS[sid] = sess
+        persist_state()
+        return sess
+
+    if agent == "hermes":
+        if not hm.api_key():
+            raise RuntimeError("HERMES_API_SERVER_KEY is empty")
+        if not hm.health():
+            raise RuntimeError("Hermes gateway is not reachable at " + hm.HM_URL)
+        hm_id = resume_id or hm.create_session(cwd, user_title, model, effort)
+        hm.remember_cwd(hm_id, cwd)
+        sess = {
+            "id": sid,
+            "agent": "hermes",
+            "cwd": str(cwd),
+            "tmux": None,
+            "oc_id": None,
+            "hm_id": hm_id,
             "transcript": None,
             "title": title,
             "model": model,
@@ -1817,6 +1953,7 @@ def open_session(
         "seen_transcripts": before,
         "cli_session": cli_session,
         "oc_id": None,
+        "hm_id": None,
         "title": title,
         "model": model,
         "effort": effort,
@@ -1856,9 +1993,7 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
             continue
         if apply_native_title(sess, persist=False, registry=registry):
             changed = True
-        live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or (
-            sess["agent"] == "opencode" and bool(sess.get("oc_id"))
-        )
+        live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or http_live(sess)
         if not live:
             continue
         subagents = session_subagents(sess)
@@ -1873,7 +2008,7 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
         }
         if sess.get("tmux"):
             pub["busy"] = session_is_working(sess, pane) or bool(subagents) or bool(choice)
-        elif sess.get("agent") == "opencode" and sess.get("oc_id"):
+        elif http_live(sess):
             pub["busy"] = session_is_working(sess) or bool(subagents) or bool(choice)
         elif subagents or choice:
             pub["busy"] = True
@@ -1892,6 +2027,11 @@ def kill_session(sid: str) -> None:
     if sess.get("agent") == "opencode" and sess.get("oc_id"):
         try:
             oc.abort(str(sess["oc_id"]), Path(sess["cwd"]))
+        except RuntimeError:
+            pass
+    if sess.get("agent") == "hermes" and sess.get("hm_id"):
+        try:
+            hm.abort(str(sess["hm_id"]))
         except RuntimeError:
             pass
     if sess.get("tmux"):
@@ -1956,6 +2096,8 @@ class Handler(BaseHTTPRequestHandler):
                     "tmux": tmux_ok(),
                     "opencode": shutil_which("opencode") is not None,
                     "opencode_serve": oc.health(),
+                    "hermes": hermes_on() and hm.health(),
+                    "hermes_enabled": hermes_on(),
                     "host_projects": str(HOST_PROJECTS),
                 }
                 st, raw, ct = json_bytes(body)
@@ -2101,6 +2243,8 @@ class Handler(BaseHTTPRequestHandler):
                 sess = get_session(m.group(1))
                 if sess["agent"] == "opencode" and sess.get("oc_id"):
                     oc.abort(str(sess["oc_id"]), Path(sess["cwd"]))
+                elif sess["agent"] == "hermes" and sess.get("hm_id"):
+                    hm.abort(str(sess["hm_id"]))
                 elif sess.get("tmux"):
                     tmux_send_keys(sess["tmux"], ["Escape"])
                 else:
@@ -2193,6 +2337,9 @@ class Handler(BaseHTTPRequestHandler):
         if sess["agent"] == "opencode":
             if not sess.get("oc_id"):
                 raise RuntimeError("no opencode session")
+        elif sess["agent"] == "hermes":
+            if not sess.get("hm_id"):
+                raise RuntimeError("no hermes session")
         elif not sess.get("tmux") or not tmux_has(sess["tmux"]):
             raise RuntimeError("tmux session is gone")
         enqueue_send(sid, text)
@@ -2264,7 +2411,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(b"event: gone\ndata: {}\n\n")
                     self.wfile.flush()
                     return
-                if sess.get("agent") == "opencode":
+                if sess.get("agent") in ("opencode", "hermes"):
                     payload = session_public(sess)
                     fp = json.dumps(
                         {
@@ -2291,7 +2438,10 @@ class Handler(BaseHTTPRequestHandler):
                         chunk = f"event: sync\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
                         self.wfile.write(chunk.encode("utf-8"))
                         self.wfile.flush()
-                    oc.wait(str(sess.get("oc_id") or ""), timeout=0.35 if payload.get("busy") else 1.2)
+                    if sess.get("agent") == "opencode":
+                        oc.wait(str(sess.get("oc_id") or ""), timeout=0.35 if payload.get("busy") else 1.2)
+                    else:
+                        hm.wait(str(sess.get("hm_id") or ""), timeout=0.35 if payload.get("busy") else 1.2)
                     continue
                 fp = fingerprint(sess)
                 pane = tmux_capture(sess["tmux"]) if sess.get("tmux") else ""

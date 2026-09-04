@@ -1,17 +1,16 @@
 services:
   # Opt-in: set HERMES=1 in .env (compose profile "hermes")
-  # Terminal backend = docker → agents:local (claude / agent / pi / opencode available there).
-  # AGENTS_DIR must be absolute in .env (start.sh / run.sh write it automatically).
-  # Gateway+dashboard (:9119) for config/ops; Open WebUI (:3000) for chat.
+  # Local terminal inside this container (TERMINAL_ENV=local).
+  # Gateway API :8642, dashboard :9119.
   hermes:
     profiles: ["hermes"]
     image: nousresearch/hermes-agent:latest
     container_name: hermes
     restart: unless-stopped
-    # Do NOT depends_on agents — recreating hermes would restart agents and kill
-    # live Cursor/Claude sessions. Sandbox only needs the agents:local image + socket.
+    # Do NOT depends_on agents — recreating hermes must not restart live
+    # Cursor/Claude sessions in the agents container.
     depends_on:
-      - searxng
+      - firecrawl
     command: ["gateway", "run"]
     ports:
       - "127.0.0.1:8642:8642"     # gateway API / health
@@ -21,102 +20,42 @@ services:
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USER:-admin}
       HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_PASSWORD:-}
       HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${HERMES_DASHBOARD_SECRET:-}
-      # OpenAI-compatible API on :8642 — Open WebUI routes chat through this
-      # gateway (tools/sandbox stay here, not in open-webui).
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: "0.0.0.0"
       API_SERVER_KEY: ${HERMES_API_SERVER_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      CURSOR_API_KEY: ${CURSOR_API_KEY:-}
-      # Compose-network URL — Hermes web_search backend (search_backend: searxng)
+      # Compose-network URL — Hermes web_search / web_extract (web.backend: firecrawl)
       # Also persisted in data/hermes/.env so get_env_value sees it.
-      SEARXNG_URL: http://searxng:8080
       FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-http://firecrawl:3002}
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
       # macOS: gh stores OAuth in Keychain — start.sh/run.sh inject via `gh auth token`.
       # Hermes Skills Hub / github-auth read GITHUB_TOKEN (GH_TOKEN is the gh CLI name).
       GH_TOKEN: ${GH_TOKEN:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       HOST_PROJECTS: ${HOST_PROJECTS}
-      AGENTS_DIR: ${AGENTS_DIR}
-      HOST_HOME: ${HOME}
       # Image default is /opt/data only — also allow write_file/patch under mounted projects
       HERMES_WRITE_SAFE_ROOT: /opt/data:/tmp:${HOST_PROJECTS}
       # Non-root UID for data/hermes bind mount. On macOS use your host id (often 501);
       # start.sh writes HERMES_UID/GID if unset.
       HERMES_UID: ${HERMES_UID:-1000}
       HERMES_GID: ${HERMES_GID:-1000}
-      # Drive host Docker from inside hermes (sandbox = agents:local)
-      TERMINAL_ENV: docker
-      TERMINAL_DOCKER_IMAGE: agents:local
-      TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "true"
-      TERMINAL_CONTAINER_PERSISTENT: "true"
-      TERMINAL_DOCKER_FORWARD_ENV: '["CURSOR_API_KEY","ANTHROPIC_API_KEY","OPENAI_API_KEY","GOOGLE_API_KEY","GH_TOKEN","GITHUB_TOKEN","CLAUDE_CONFIG_DIR","CAVEMAN_DEFAULT_MODE","AGENTS_CLIPBOARD_DIR","AGENTS_GPU_DIR","AGENTS_CMUX_DIR","HOST_PROJECTS","CMUX_WORKSPACE_ID","CMUX_SURFACE_ID","CMUX_TAB_ID","CMUX_WINDOW_ID","SEARXNG_URL","FIRECRAWL_API_URL"]'
-      # DISPLAY=:0 → Cursor CLI will call xclip stubs (no real X11 needed)
-      TERMINAL_DOCKER_ENV: '{"CLAUDE_CONFIG_DIR":"/root/.claude","CAVEMAN_DEFAULT_MODE":"ultra","IS_SANDBOX":"1","AGENTS_CLIPBOARD_DIR":"/var/agents-clipboard","AGENTS_GPU_DIR":"/var/agents-gpu","AGENTS_CMUX_DIR":"/var/agents-cmux","DISPLAY":":0"}'
-      # Host-absolute bind mounts (compose interpolates before the container sees them)
-      TERMINAL_DOCKER_VOLUMES: '["${HOST_PROJECTS}:${HOST_PROJECTS}","${AGENTS_DIR}/data/claude:/root/.claude","${AGENTS_DIR}/data/cursor:/root/.cursor","${AGENTS_DIR}/data/cursor-config:/root/.config/cursor","${AGENTS_DIR}/data/pi:/root/.pi","${AGENTS_DIR}/data/opencode:/root/.local/share/opencode","${AGENTS_DIR}/data/opencode-config:/root/.config/opencode","${AGENTS_DIR}/data/clipboard:/var/agents-clipboard","${AGENTS_DIR}/data/gpu:/var/agents-gpu","${AGENTS_DIR}/data/cmux:/var/agents-cmux","${AGENTS_DIR}/data/gitconfig:/root/.gitconfig:ro","${AGENTS_DIR}/data/gh:/root/.config/gh:ro","${HOME}/.ssh:/root/.ssh:ro","${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"]'
+      # Shell / file / execute_code run inside this container.
+      TERMINAL_ENV: local
     volumes:
       - ./data/hermes:/opt/data
       - ${HOST_PROJECTS}:${HOST_PROJECTS}
-      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       # Linux gh config with oauth_token (host ~/.config/gh has none — Keychain).
       # Not under home/: stage2 recursively chowns that tree.
       - ./data/gh:/opt/data/.config/gh:ro
       - ./data/gitconfig:/opt/data/.gitconfig:ro
 
-  # Open WebUI as chat frontend. Talks to Hermes' OpenAI-compatible API
-  # (http://hermes:8642/v1) so tools/memory/cron/Docker sandbox stay on the
-  # gateway — Open WebUI is only the browser UI, not a second agent.
-  # Dashboard stays on :9119 for config; use :3000 for webchat.
-  # Official guide: https://hermes-agent.nousresearch.com/docs/user-guide/messaging/open-webui
-  open-webui:
-    profiles: ["hermes"]
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
-    restart: unless-stopped
-    depends_on:
-      - hermes
-    ports:
-      - "127.0.0.1:3000:8080"
-    environment:
-      # Same compose network — no host.docker.internal needed
-      OPENAI_API_BASE_URL: http://hermes:8642/v1
-      OPENAI_API_KEY: ${HERMES_API_SERVER_KEY:-}
-      # Suppress empty default Ollama backend in the model picker
-      ENABLE_OLLAMA_API: "false"
-      # No login — Open WebUI is only reachable via localhost / Tailscale
-      WEBUI_AUTH: "false"
-    volumes:
-      - ./data/open-webui:/app/backend/data
-
-  # Metasearch for Hermes web_search — JSON enabled via config/searxng/settings.yml.
-  # Same compose profile as hermes (HERMES=1 / --profile hermes).
-  searxng:
-    profiles: ["hermes"]
-    image: docker.io/searxng/searxng:latest
-    container_name: searxng
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8888:8080"   # host curl / browser smoke-test
-    volumes:
-      - ./config/searxng:/etc/searxng:rw
-    environment:
-      SEARXNG_BASE_URL: http://searxng:8080/
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN
-      - SETGID
-      - SETUID
-      - DAC_OVERRIDE
-
-  # Opt-in scrape API (Firecrawl-shaped /v2/scrape). One container — official
-  # Firecrawl OSS needs Redis+RabbitMQ+Postgres+Playwright and is too heavy here.
-  # Image: Molx (https://github.com/ioi-labs/molx). Set FIRECRAWL=1.
+  # Firecrawl-shaped scrape/search API for Hermes web_search / web_extract.
+  # One container — official Firecrawl OSS needs Redis+RabbitMQ+Postgres+Playwright.
+  # Image: Molx (https://github.com/ioi-labs/molx). Starts with HERMES=1 and/or FIRECRAWL=1.
   firecrawl:
-    profiles: ["firecrawl"]
+    profiles: ["hermes", "firecrawl"]
     image: ghcr.io/ioi-labs/molx:latest
     container_name: firecrawl
     restart: unless-stopped
@@ -154,7 +93,7 @@ services:
     # Override via AGENTS_MEM_LIMIT in .env (e.g. 4g, 6g)
     mem_limit: ${AGENTS_MEM_LIMIT:-3g}
     ports:
-      - "127.0.0.1:3780:3780"   # wrap — native CLI sessions (tmux / OpenCode API)
+      - "127.0.0.1:3000:3000"   # wrap — native CLI sessions (tmux / OpenCode API)
     environment:
       # Cursor CLI
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}
@@ -183,11 +122,15 @@ services:
       # wrap: native Claude/Cursor tmux + OpenCode HTTP (no extra harness)
       AGENTS_WRAP_SERVE: ${AGENTS_WRAP_SERVE:-1}
       WRAP_HOST: "0.0.0.0"
-      WRAP_PORT: "3780"
-      WRAP_PUBLIC_URL: ${WRAP_PUBLIC_URL:-http://127.0.0.1:3780}
+      WRAP_PORT: "3000"
+      WRAP_PUBLIC_URL: ${WRAP_PUBLIC_URL:-http://127.0.0.1:3000}
       # Own OpenCode HTTP port — leave the default :4096 free
       WRAP_OPENCODE_PORT: "4097"
-      # Self-hosted Firecrawl (profile firecrawl / FIRECRAWL=1)
+      # Hermes as a wrap agent when HERMES=1 (gateway on the compose network)
+      HERMES: ${HERMES:-0}
+      HERMES_API_SERVER_KEY: ${HERMES_API_SERVER_KEY:-}
+      WRAP_HERMES_URL: ${WRAP_HERMES_URL:-http://hermes:8642}
+      # Self-hosted Firecrawl / Molx (profile hermes+firecrawl / HERMES=1 or FIRECRAWL=1)
       FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-http://firecrawl:3002}
     volumes:
       # Same path as host so compose bind mounts resolve correctly

@@ -263,7 +263,7 @@ ensure_wrap_serve() {
   fi
 
   printf 'Starting wrap (native sessions) on %s:%s\n' \
-    "${WRAP_HOST:-0.0.0.0}" "${WRAP_PORT:-3780}"
+    "${WRAP_HOST:-0.0.0.0}" "${WRAP_PORT:-3000}"
   nohup "$serve" >>"$log_file" 2>&1 &
 }
 

@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Container session safety
 
-This workspace is often opened **inside** the `agents:local` Docker container (via Hermes sandbox or `agents-shell`). The agent process lives in that container.
+This workspace is often opened **inside** the `agents:local` Docker container (via `agents-shell`). The agent process lives in that container.
 
 **Never run** while working in this repo (unless the user explicitly asks and understands the cost):
 
