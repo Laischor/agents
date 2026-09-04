@@ -523,6 +523,24 @@ def _image_part(path: str) -> dict[str, Any] | None:
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
 
 
+def _history_for_run(hm_id: str) -> list[dict[str, str]]:
+    """Prior user/assistant text (Open WebUI-style). Tool-only rows are omitted."""
+    out: list[dict[str, str]] = []
+    try:
+        rows = _fetch_messages(hm_id, limit=500)
+    except Exception:  # noqa: BLE001
+        return out
+    for msg in rows:
+        role = str(msg.get("role") or "")
+        if role not in ("user", "assistant"):
+            continue
+        text = str(msg.get("text") or "").strip()
+        if not text:
+            continue
+        out.append({"role": role, "content": text})
+    return out
+
+
 def prompt_async(hm_id: str, cwd: Path | str, text: str, model: str = "", effort: str = "") -> None:
     if not hm_id:
         raise RuntimeError("no hermes session")
@@ -539,15 +557,26 @@ def prompt_async(hm_id: str, cwd: Path | str, text: str, model: str = "", effort
 
 
 def _run_turn(hm_id: str, cwd: Path | str, text: str, model: str, effort: str) -> None:
+    _invalidate("msg:", f"sess:{hm_id}")
+    history = _history_for_run(hm_id)
     body: dict[str, Any] = {
         "input": prompt_parts(text),
         "session_id": hm_id,
         "instructions": _cwd_prompt(cwd),
     }
+    if history:
+        body["conversation_history"] = history
     body.update(model_body(model, effort))
     run_id = ""
     try:
-        started = request("POST", "/v1/runs", body, timeout=60.0)
+        log(f"hermes turn {hm_id} history={len(history)}")
+        started = request(
+            "POST",
+            "/v1/runs",
+            body,
+            timeout=60.0,
+            headers={"X-Hermes-Session-Id": hm_id},
+        )
         info = started if isinstance(started, dict) else {}
         run_id = str(info.get("run_id") or info.get("id") or "")
         if run_id:
