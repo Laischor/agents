@@ -1,6 +1,17 @@
 const $ = (id) => document.getElementById(id);
 
 const AGENT_LABEL = { claude: "Claude", cursor: "Cursor", opencode: "OpenCode", hermes: "Hermes" };
+const FILTER_KEY = "wrap.agentFilter";
+
+function readAgentFilter() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(FILTER_KEY) || "null");
+    if (!Array.isArray(raw)) return null;
+    return new Set(raw.map(String).filter(Boolean));
+  } catch {
+    return null;
+  }
+}
 
 const state = {
   agent: "claude",
@@ -17,6 +28,7 @@ const state = {
   query: "",
   searchHits: null,
   searchGen: 0,
+  agentFilter: readAgentFilter(),
   projects: [],
   pending: {},
   sending: false,
@@ -389,8 +401,94 @@ function sortModels(items) {
   return head.concat(rest);
 }
 
+function listedAgents() {
+  const seen = new Map();
+  const add = (id, label) => {
+    if (!id || seen.has(id)) return;
+    seen.set(id, { id, label: label || AGENT_LABEL[id] || id });
+  };
+  const fromCat = state.catalog.agents;
+  if (fromCat && fromCat.length) {
+    for (const a of fromCat) add(a.id, a.label);
+  } else {
+    add("claude", "Claude");
+    add("cursor", "Cursor");
+    add("opencode", "OpenCode");
+  }
+  for (const s of [...(state.sessions || []), ...(state.history || [])]) {
+    add(s.agent);
+  }
+  return [...seen.values()];
+}
+
+function filterActive() {
+  return state.agentFilter instanceof Set;
+}
+
+function matchesAgent(s) {
+  if (!filterActive()) return true;
+  return state.agentFilter.has(s.agent || "");
+}
+
+function saveAgentFilter() {
+  if (!filterActive()) localStorage.removeItem(FILTER_KEY);
+  else localStorage.setItem(FILTER_KEY, JSON.stringify([...state.agentFilter]));
+}
+
+function syncFilterBtn() {
+  const btn = $("btn-filter");
+  if (!btn) return;
+  btn.classList.toggle("on", filterActive());
+  btn.title = filterActive()
+    ? state.agentFilter.size
+      ? `Filter: ${[...state.agentFilter].map(agentLabel).join(", ")}`
+      : "Filter: none"
+    : "Filter by agent";
+}
+
+function fillAgentFilter() {
+  const panel = $("agent-filter");
+  if (!panel) return;
+  panel.innerHTML = "";
+  const agents = listedAgents();
+  const sel = state.agentFilter;
+  const allOn = !filterActive();
+  for (const a of agents) {
+    const row = document.createElement("label");
+    row.className = "agent-filter-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = a.id;
+    cb.checked = allOn || (sel && sel.has(a.id));
+    cb.addEventListener("change", () => {
+      const boxes = [...panel.querySelectorAll("input[type=checkbox]")];
+      const next = new Set(boxes.filter((el) => el.checked).map((el) => el.value));
+      state.agentFilter = next.size === boxes.length ? null : next;
+      saveAgentFilter();
+      syncFilterBtn();
+      renderSessions();
+    });
+    const span = document.createElement("span");
+    span.textContent = a.label;
+    row.appendChild(cb);
+    row.appendChild(span);
+    panel.appendChild(row);
+  }
+}
+
+function setFilterOpen(open) {
+  const panel = $("agent-filter");
+  const btn = $("btn-filter");
+  if (!panel || !btn) return;
+  panel.hidden = !open;
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) fillAgentFilter();
+}
+
 function applyCatalog() {
   fillAgents();
+  if (!$("agent-filter").hidden) fillAgentFilter();
+  syncFilterBtn();
   const cat = state.catalog[state.agent] || { models: [], effort: [], fast: false };
   const prefs = loadPrefs();
   const model = state.session ? state.session.model || "" : prefs.model || "";
@@ -665,17 +763,26 @@ function renderSessions() {
   const ul = $("sessions");
   ul.innerHTML = "";
   const q = (state.query || "").trim();
-  const live = (state.sessions || []).filter((s) => s.live).filter((s) => matchesQuery(s, q));
-  const closedSrc = q
+  const live = (state.sessions || [])
+    .filter((s) => s.live)
+    .filter((s) => matchesQuery(s, q) && matchesAgent(s));
+  const closedSrc = (q
     ? state.searchHits || (state.history || []).filter((s) => matchesQuery(s, q))
-    : state.history || [];
+    : state.history || []
+  ).filter(matchesAgent);
   const liveKeys = new Set(live.map(nativePair).filter((k) => k !== ":"));
   const pinnedLive = live.filter((s) => s.pinned);
   const restLive = live.filter((s) => !s.pinned);
   const pinnedClosed = closedSrc.filter((s) => s.pinned && !liveKeys.has(nativePair(s)));
   const unpinnedClosed = closedSrc.filter((s) => !s.pinned);
   const searching = Boolean(q) && state.searchHits === null && q.length >= 2;
-  if (state.draft && matchesQuery({ title: "New session", cwd: state.cwd, agent: state.agent }, q)) {
+  let draftShown = false;
+  if (
+    state.draft &&
+    matchesQuery({ title: "New session", cwd: state.cwd, agent: state.agent }, q) &&
+    matchesAgent({ agent: state.agent })
+  ) {
+    draftShown = true;
     const li = document.createElement("li");
     li.className = "draft on";
     li.innerHTML = `<button type="button" class="sess-open"><span class="sess-title">New session</span><span class="sess-meta">${
@@ -684,10 +791,10 @@ function renderSessions() {
     li.querySelector("button").addEventListener("click", () => openDraft());
     ul.appendChild(li);
   }
-  if (!pinnedLive.length && !restLive.length && !pinnedClosed.length && !state.draft && !searching) {
+  if (!pinnedLive.length && !restLive.length && !pinnedClosed.length && !draftShown && !searching) {
     const empty = document.createElement("li");
     empty.className = "muted";
-    empty.textContent = q ? "No matching sessions" : "No active sessions";
+    empty.textContent = q || filterActive() ? "No matching sessions" : "No active sessions";
     ul.appendChild(empty);
   }
   const openListed = (s) => {
@@ -1610,6 +1717,16 @@ $("search").addEventListener("keydown", (e) => {
     clearSearch();
   }
 });
+$("btn-filter").addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  setFilterOpen($("agent-filter").hidden);
+});
+document.addEventListener("pointerdown", (e) => {
+  if ($("agent-filter").hidden) return;
+  if (e.target.closest("#search-row")) return;
+  setFilterOpen(false);
+});
 $("btn-menu").addEventListener("click", () => {
   setMenuOpen(!document.body.classList.contains("menu-open"));
 });
@@ -1668,6 +1785,11 @@ $("tui").addEventListener("click", (e) => {
   if (state.paneOpen) $("pane").focus();
 });
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("agent-filter").hidden) {
+    e.preventDefault();
+    setFilterOpen(false);
+    return;
+  }
   if (e.key === "Escape" && document.body.classList.contains("menu-open")) {
     e.preventDefault();
     closeMenu();
@@ -1798,6 +1920,7 @@ function connectAlerts() {
 }
 
 applyChrome();
+syncFilterBtn();
 Promise.all([loadCatalog(), loadProjects(), loadHealth(), loadSessions()]).then(() => {
   const id = (location.hash || "#").slice(1);
   if (id) onHash();

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="dark" />
   <title>wrap — native sessions</title>
-  <link rel="stylesheet" href="/static/style.css?v=29" />
+  <link rel="stylesheet" href="/static/style.css?v=30" />
 </head>
 <body>
   <div id="scrim" hidden></div>
@@ -18,8 +18,14 @@
       </div>
     </header>
     <h2>Sessions <button type="button" id="btn-new" class="ghost tiny">New</button></h2>
-    <div id="lists">
+    <div id="search-row">
       <input id="search" type="search" placeholder="Search sessions…" autocomplete="off" />
+      <button type="button" id="btn-filter" class="ghost" aria-label="Filter agents" aria-haspopup="true" aria-expanded="false" aria-controls="agent-filter" title="Filter by agent">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M1.6 2.2h12.8l-4.6 5.6v4.4L6.2 14V7.8L1.6 2.2z"/></svg>
+      </button>
+      <div id="agent-filter" hidden></div>
+    </div>
+    <div id="lists">
       <ul id="sessions"></ul>
       <h2 id="closed-head" hidden>Closed</h2>
       <ul id="closed" hidden></ul>
@@ -79,6 +85,6 @@
       </div>
     </form>
   </main>
-  <script src="/static/app.js?v=29"></script>
+  <script src="/static/app.js?v=30"></script>
 </body>
 </html>
