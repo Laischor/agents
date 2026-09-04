@@ -38,7 +38,8 @@ HOST_PROJECTS = Path(os.environ.get("HOST_PROJECTS", "/Users/mr/projects")).reso
 
 _lock = threading.RLock()
 _cv = threading.Condition(_lock)
-_busy: dict[str, str] = {}  # hm_id -> run_id (empty string = chat in flight)
+_busy: dict[str, str] = {}  # hm_id -> run_id (empty string = starting; "chat" = completions stream)
+_live: dict[str, Any] = {}  # hm_id -> streaming HTTP response
 _gen: dict[str, int] = {}
 _all = 0
 _cwd: dict[str, str] = {}
@@ -271,6 +272,34 @@ def request(
         raise RuntimeError(f"hermes {method} {path}: {exc.code} {err[:400]}") from exc
 
 
+def _open(
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout: float | None = 30.0,
+    headers: dict[str, str] | None = None,
+):
+    key = api_key()
+    if not key:
+        raise RuntimeError("HERMES_API_SERVER_KEY is empty")
+    data = None if body is None else json.dumps(body).encode()
+    hdrs = {
+        "Accept": "text/event-stream, application/json",
+        "Authorization": f"Bearer {key}",
+    }
+    if body is not None:
+        hdrs["Content-Type"] = "application/json"
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(f"{HM_URL}{path}", data=data, method=method, headers=hdrs)
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        err = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"hermes {method} {path}: {exc.code} {err[:400]}") from exc
+
+
 def _session_id(payload: Any) -> str:
     info = _as_dict(payload)
     sid = info.get("id") or info.get("session_id") or ""
@@ -470,18 +499,23 @@ def _wait_run_done(run_id: str, timeout: float = 20.0) -> None:
 
 
 def abort(hm_id: str) -> None:
-    """Stop the in-flight gateway run (Hermes /stop), then clear wrap busy."""
-    run_id = _wait_run_id(hm_id, timeout=3.0)
-    if run_id:
-        try:
-            request("POST", f"/v1/runs/{run_id}/stop", {})
-        except RuntimeError as exc:
-            log(f"hermes stop {run_id}: {exc}")
-        _wait_run_done(run_id, timeout=20.0)
+    """Stop the in-flight turn (SSE disconnect or /v1/runs/{id}/stop)."""
     with _lock:
+        resp = _live.pop(hm_id, None)
         cur = _busy.get(hm_id)
-        if cur == run_id or cur == "":
-            _busy.pop(hm_id, None)
+    if resp is not None:
+        try:
+            resp.close()
+        except Exception:
+            pass
+    if cur and cur not in ("", "chat"):
+        try:
+            request("POST", f"/v1/runs/{cur}/stop", {})
+        except RuntimeError as exc:
+            log(f"hermes stop {cur}: {exc}")
+        _wait_run_done(cur, timeout=20.0)
+    with _lock:
+        _busy.pop(hm_id, None)
     _invalidate("msg:", "sess:")
     bump(hm_id)
 
@@ -523,24 +557,6 @@ def _image_part(path: str) -> dict[str, Any] | None:
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
 
 
-def _history_for_run(hm_id: str) -> list[dict[str, str]]:
-    """Prior user/assistant text (Open WebUI-style). Tool-only rows are omitted."""
-    out: list[dict[str, str]] = []
-    try:
-        rows = _fetch_messages(hm_id, limit=500)
-    except Exception:  # noqa: BLE001
-        return out
-    for msg in rows:
-        role = str(msg.get("role") or "")
-        if role not in ("user", "assistant"):
-            continue
-        text = str(msg.get("text") or "").strip()
-        if not text:
-            continue
-        out.append({"role": role, "content": text})
-    return out
-
-
 def prompt_async(hm_id: str, cwd: Path | str, text: str, model: str = "", effort: str = "") -> None:
     if not hm_id:
         raise RuntimeError("no hermes session")
@@ -557,48 +573,53 @@ def prompt_async(hm_id: str, cwd: Path | str, text: str, model: str = "", effort
 
 
 def _run_turn(hm_id: str, cwd: Path | str, text: str, model: str, effort: str) -> None:
-    _invalidate("msg:", f"sess:{hm_id}")
-    history = _history_for_run(hm_id)
+    # Same contract as Open WebUI: /v1/chat/completions + X-Hermes-Session-Id.
+    # Only the new user turn is in `messages`; Hermes loads SessionDB history.
+    # Do not also send conversation_history — that duplicates the transcript
+    # (alternation repairs + the agent re-runs the previous lookup).
     body: dict[str, Any] = {
-        "input": prompt_parts(text),
-        "session_id": hm_id,
-        "instructions": _cwd_prompt(cwd),
+        "messages": [
+            {"role": "system", "content": _cwd_prompt(cwd)},
+            {"role": "user", "content": prompt_parts(text)},
+        ],
+        "stream": True,
     }
-    if history:
-        body["conversation_history"] = history
     body.update(model_body(model, effort))
-    run_id = ""
+    marker = "chat"
+    resp = None
     try:
-        log(f"hermes turn {hm_id} history={len(history)}")
-        started = request(
+        resp = _open(
             "POST",
-            "/v1/runs",
+            "/v1/chat/completions",
             body,
-            timeout=60.0,
+            timeout=600.0,
             headers={"X-Hermes-Session-Id": hm_id},
         )
-        info = started if isinstance(started, dict) else {}
-        run_id = str(info.get("run_id") or info.get("id") or "")
-        if run_id:
+        with _lock:
+            if hm_id in _busy:
+                _busy[hm_id] = marker
+            _live[hm_id] = resp
+        bump(hm_id)
+        while True:
             with _lock:
-                if hm_id in _busy:
-                    _busy[hm_id] = run_id
+                if _busy.get(hm_id) != marker:
+                    break
+            line = resp.readline()
+            if not line:
+                break
             bump(hm_id)
-            _poll_run(hm_id, run_id)
-        else:
-            request(
-                "POST",
-                f"/api/sessions/{hm_id}/chat",
-                {"message": body["input"], **model_body(model, effort)},
-                timeout=300.0,
-            )
     except Exception as exc:  # noqa: BLE001
         log(f"hermes turn failed {hm_id}: {exc}")
     finally:
         with _lock:
-            cur = _busy.get(hm_id)
-            if cur == run_id or (cur == "" and not run_id):
+            _live.pop(hm_id, None)
+            if _busy.get(hm_id) == marker:
                 _busy.pop(hm_id, None)
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
         _invalidate("msg:", f"sess:{hm_id}", "list:")
         bump(hm_id)
 
