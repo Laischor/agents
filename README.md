@@ -240,7 +240,7 @@ Search is built into Molx. Optional LLM extract uses `OPENAI_API_KEY` + `FIRECRA
 
 Hermes uses `terminal.backend: local` (`TERMINAL_ENV=local`). Shell, file, and `execute_code` tools run **inside the `hermes` container** — not in `agents:local`, and without Cursor CLI / Claude Code on `PATH`. Coding agents stay in the separate `agents` service (`dagent` / `dclaude` / …).
 
-`HOST_PROJECTS` is bind-mounted so `write_file` / `patch` can touch the project tree (`HERMES_WRITE_SAFE_ROOT=/opt/data:/tmp:${HOST_PROJECTS}`). There is no Docker socket on the gateway.
+`HOST_PROJECTS` is bind-mounted so `write_file` / `patch` can touch the project tree (`HERMES_WRITE_SAFE_ROOT=/opt/data:/tmp:${HOST_PROJECTS}`). The gateway also mounts `${DOCKER_SOCK:-/var/run/docker.sock}` so you can restart `agents` (or other compose services) from the dashboard when wrap is unresponsive — the terminal backend stays `local`, not the old `agents:local` sandbox.
 
 ## Persistence
 
