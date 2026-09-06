@@ -31,9 +31,12 @@ const state = {
   agentFilter: readAgentFilter(),
   projects: [],
   pending: {},
+  acked: {},
   sending: false,
   spawning: false,
 };
+
+const PENDING_KEY = "wrap.pending";
 
 const prefsKey = (agent) => `wrap.prefs.${agent}`;
 
@@ -985,6 +988,7 @@ function renderSession(sess) {
   fillProjects();
   applyCatalog();
   setStatus("");
+  seedQueued(sess);
   renderMessages(mergeMessages(sess.messages || []));
   if (sess.tmux) {
     $("pane").textContent = sess.pane || "";
@@ -1006,8 +1010,12 @@ function renderMessages(messages) {
   const busy = Boolean(state.session?.busy);
   const choice = state.session?.choice;
   const rows = messages.slice();
-  if (busy && !choice && (!rows.length || rows[rows.length - 1].role === "user")) {
-    rows.push({ id: "streaming", role: "assistant", parts: [], text: "" });
+  const lastReal = [...rows].reverse().find((m) => !m.pending);
+  if (busy && !choice && (!lastReal || lastReal.role === "user")) {
+    const streaming = { id: "streaming", role: "assistant", parts: [], text: "" };
+    const pendingAt = rows.findIndex((m) => m.pending);
+    if (pendingAt >= 0) rows.splice(pendingAt, 0, streaming);
+    else rows.push(streaming);
   }
   if (!rows.length && !choice) {
     const empty = document.createElement("div");
@@ -1390,6 +1398,13 @@ async function wakeClosed(peek) {
       state.pending[sess.id] = (state.pending[sess.id] || []).concat(state.pending[oldId]);
       delete state.pending[oldId];
     }
+    if (oldId && oldId !== sess.id && state.acked[oldId]) {
+      const next = state.acked[sess.id] || new Set();
+      for (const t of state.acked[oldId]) next.add(t);
+      state.acked[sess.id] = next;
+      delete state.acked[oldId];
+    }
+    persistPending();
     renderSession(sess);
     connectStream(sess.id);
     loadSessions();
@@ -1401,20 +1416,140 @@ async function wakeClosed(peek) {
   }
 }
 
+function userText(m) {
+  if (typeof m?.text === "string" && m.text.trim()) return m.text;
+  return (m?.parts || [])
+    .filter((p) => p && p.type === "text" && p.text)
+    .map((p) => p.text)
+    .join("\n\n");
+}
+
+function sameUserText(a, b) {
+  const x = String(a || "").trim();
+  const y = String(b || "").trim();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (x.endsWith(y) || y.endsWith(x)) return true;
+  const shorter = x.length <= y.length ? x : y;
+  const longer = x.length <= y.length ? y : x;
+  return shorter.length >= 8 && longer.includes(shorter);
+}
+
+function snapshotUsers(messages) {
+  const users = (messages || []).filter((m) => m.role === "user");
+  return {
+    afterIds: new Set(users.map((m) => m.id).filter(Boolean)),
+    afterCount: users.length,
+  };
+}
+
+function isOldUser(p, m, i) {
+  if (m.id && p.afterIds && p.afterIds.has(m.id)) return true;
+  if (!m.id && typeof p.afterCount === "number" && i < p.afterCount) return true;
+  return false;
+}
+
+function persistPending() {
+  try {
+    const dump = { pending: {}, acked: {} };
+    for (const [sid, items] of Object.entries(state.pending)) {
+      if (!items || !items.length) continue;
+      dump.pending[sid] = items.map((p) => ({
+        id: p.id,
+        text: p.text,
+        afterIds: p.afterIds ? [...p.afterIds] : [],
+        afterCount: p.afterCount || 0,
+      }));
+    }
+    for (const [sid, texts] of Object.entries(state.acked)) {
+      const list = texts ? [...texts] : [];
+      if (list.length) dump.acked[sid] = list.slice(-50);
+    }
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify(dump));
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function loadPending() {
+  try {
+    const dump = JSON.parse(sessionStorage.getItem(PENDING_KEY) || "{}");
+    if (!dump || typeof dump !== "object") return;
+    const pending = dump.pending && typeof dump.pending === "object" ? dump.pending : dump;
+    const acked = dump.acked && typeof dump.acked === "object" ? dump.acked : {};
+    for (const [sid, items] of Object.entries(pending)) {
+      if (sid === "pending" || sid === "acked") continue;
+      if (!Array.isArray(items)) continue;
+      state.pending[sid] = items
+        .filter((p) => p && p.text)
+        .map((p) => ({
+          id: p.id || "p-" + Date.now(),
+          text: String(p.text || ""),
+          afterIds: new Set(p.afterIds || []),
+          afterCount: Number(p.afterCount) || 0,
+        }));
+    }
+    for (const [sid, texts] of Object.entries(acked)) {
+      if (!Array.isArray(texts)) continue;
+      state.acked[sid] = new Set(texts.map(String));
+    }
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function ackPending(sid, text) {
+  if (!sid || !text) return;
+  if (!state.acked[sid]) state.acked[sid] = new Set();
+  state.acked[sid].add(text);
+}
+
+function seedQueued(sess) {
+  const sid = sess?.id;
+  if (!sid || (state.pending[sid] && state.pending[sid].length)) return;
+  const remote = sess.queued || [];
+  if (!remote.length) return;
+  const users = (sess.messages || []).filter((m) => m.role === "user");
+  const snap = snapshotUsers(sess.messages);
+  const acked = state.acked[sid] || new Set();
+  const leftover = remote.filter((text) => {
+    if (acked.has(text)) return false;
+    return !users.some((m) => sameUserText(userText(m), text));
+  });
+  if (!leftover.length) return;
+  state.pending[sid] = leftover.map((text, i) => ({
+    id: "q-" + i + "-" + Date.now(),
+    text,
+    afterIds: snap.afterIds,
+    afterCount: snap.afterCount,
+  }));
+  persistPending();
+}
+
 function mergeMessages(serverMsgs) {
   const sid = state.session?.id;
   const pending = sid ? state.pending[sid] || [] : [];
+  const users = (serverMsgs || []).filter((m) => m.role === "user");
+  const used = new Set();
   const still = [];
   for (const p of pending) {
-    const appeared = (serverMsgs || []).some(
-      (m) =>
-        m.role === "user" &&
-        typeof m.text === "string" &&
-        (m.text === p.text || m.text.endsWith(p.text)),
-    );
-    if (!appeared) still.push(p);
+    const fresh = [];
+    for (let i = 0; i < users.length; i++) {
+      if (used.has(i) || isOldUser(p, users[i], i)) continue;
+      fresh.push(i);
+    }
+    let hit = fresh.find((i) => sameUserText(userText(users[i]), p.text));
+    if (hit === undefined && fresh.length) hit = fresh[0];
+    if (hit !== undefined) {
+      used.add(hit);
+      ackPending(sid, p.text);
+    } else still.push(p);
   }
-  if (sid) state.pending[sid] = still;
+  if (sid) {
+    if (still.length) state.pending[sid] = still;
+    else delete state.pending[sid];
+    persistPending();
+  }
   return (serverMsgs || []).concat(
     still.map((p) => ({ id: p.id, role: "user", text: p.text, tools: [], pending: true })),
   );
@@ -1444,7 +1579,9 @@ async function sendMessage(ev) {
     clearAttachments();
     const sid = state.session.id;
     if (!state.pending[sid]) state.pending[sid] = [];
-    state.pending[sid].push({ id: "p-" + Date.now(), text });
+    const snap = snapshotUsers(state.session.messages || []);
+    state.pending[sid].push({ id: "p-" + Date.now(), text, ...snap });
+    persistPending();
     renderMessages(mergeMessages(state.session.messages || []));
     try {
       await api(`/api/sessions/${sid}/send`, {
@@ -1453,6 +1590,7 @@ async function sendMessage(ev) {
       });
     } catch (err) {
       state.pending[sid] = (state.pending[sid] || []).filter((p) => p.text !== text);
+      persistPending();
       $("input").value = typed;
       fitInput();
       state.attachments = attached;
@@ -1920,6 +2058,7 @@ function connectAlerts() {
 }
 
 applyChrome();
+loadPending();
 syncFilterBtn();
 Promise.all([loadCatalog(), loadProjects(), loadHealth(), loadSessions()]).then(() => {
   const id = (location.hash || "#").slice(1);

@@ -111,6 +111,7 @@ PINNED: list[str] = []  # agent:native_id, most recently pinned last
 _catalog_lock = threading.Lock()
 _catalog_cache: dict[str, Any] = {"at": 0.0, "data": None}
 _send_q: dict[str, Queue[str | None]] = {}
+_send_buf: dict[str, list[str]] = {}
 _send_workers: dict[str, threading.Thread] = {}
 _sending: set[str] = set()
 _busy_hold: dict[str, float] = {}
@@ -974,23 +975,72 @@ def cursor_model_arg(model: str, effort: str, fast: bool) -> str:
     return f"{model}[{','.join(opts)}]"
 
 
-def tmux_wait_idle(name: str, timeout: float = 180.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not tmux_has(name):
+def tmux_ready_for_send(sess: dict[str, Any], name: str) -> bool:
+    """True when paste+Enter reaches the composer (idle or native mid-turn queue).
+
+    Do not wait for the turn to finish — Claude/Cursor absorb a follow-up while
+    working. Only block on a choice/permission overlay, where paste would answer it.
+    """
+    if not name or not tmux_has(name):
+        return False
+    pane = tmux_capture(name)
+    return session_choice(sess, pane) is None
+
+
+def tmux_wait_sendable(sess: dict[str, Any], name: str) -> bool:
+    """Block until paste is safe. False if tmux/session is gone."""
+    sid = str(sess.get("id") or "")
+    while True:
+        try:
+            sess = get_session(sid)
+        except KeyError:
             return False
-        if not pane_busy(tmux_capture(name)):
-            time.sleep(0.2)
-            if not pane_busy(tmux_capture(name)):
+        name = str(sess.get("tmux") or name)
+        if not name or not tmux_has(name):
+            return False
+        if tmux_ready_for_send(sess, name):
+            time.sleep(0.15)
+            try:
+                sess = get_session(sid)
+            except KeyError:
+                return False
+            if tmux_ready_for_send(sess, name):
                 return True
         time.sleep(0.3)
-    return False
 
 
 def tmux_wait_busy(name: str, timeout: float = 8.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if pane_busy(tmux_capture(name)):
+            return True
+        time.sleep(0.15)
+    return False
+
+
+def tmux_wait_accepted(sess: dict[str, Any], name: str, text: str, timeout: float = 20.0) -> bool:
+    """True once the prompt is in the transcript (user row or Claude queue-operation)."""
+    deadline = time.time() + timeout
+    needle = (text or "").strip()
+    sid = str(sess.get("id") or "")
+    was_busy = pane_busy(tmux_capture(name)) if tmux_has(name) else False
+    while time.time() < deadline:
+        if not tmux_has(name):
+            return False
+        try:
+            sess = get_session(sid)
+        except KeyError:
+            return False
+        for m in reversed(load_messages(sess)):
+            if m.get("role") != "user":
+                continue
+            got = str(m.get("text") or "").strip()
+            if not needle or not got:
+                break
+            if got == needle or got.endswith(needle) or needle.endswith(got):
+                return True
+            break
+        if not was_busy and pane_busy(tmux_capture(name)):
             return True
         time.sleep(0.15)
     return False
@@ -1047,12 +1097,36 @@ def hermes_send_text(sess: dict[str, Any], text: str) -> None:
     )
 
 
+def queued_sends(sid: str) -> list[str]:
+    with _lock:
+        return list(_send_buf.get(sid) or [])
+
+
+def _queued_fp(sid: str) -> str:
+    q = queued_sends(sid)
+    return f"{len(q)}:" + ",".join(str(len(t)) for t in q)
+
+
+def _pop_send_buf(sid: str, text: str) -> None:
+    with _lock:
+        buf = _send_buf.get(sid)
+        if not buf:
+            return
+        try:
+            buf.remove(text)
+        except ValueError:
+            pass
+        if not buf:
+            _send_buf.pop(sid, None)
+
+
 def enqueue_send(sid: str, text: str) -> None:
     with _lock:
         q = _send_q.get(sid)
         if q is None:
             q = Queue()
             _send_q[sid] = q
+        _send_buf.setdefault(sid, []).append(text)
         q.put(text)
         worker = _send_workers.get(sid)
         if worker is None or not worker.is_alive():
@@ -1070,39 +1144,43 @@ def _drain_sends(sid: str) -> None:
         if text is None:
             return
         try:
-            sess = get_session(sid)
-        except KeyError:
-            return
-        try:
-            if sess["agent"] == "opencode":
-                oc_send_text(sess, text)
-                continue
-            if sess["agent"] == "hermes":
-                hermes_send_text(sess, text)
-                continue
-            name = sess.get("tmux")
-            if not name or not tmux_has(name):
-                log(f"send dropped, tmux gone {sid}")
-                continue
-            with _lock:
-                _sending.add(sid)
             try:
-                tmux_wait_idle(name)
-                if not tmux_has(name):
+                sess = get_session(sid)
+            except KeyError:
+                return
+            try:
+                if sess["agent"] == "opencode":
+                    oc_send_text(sess, text)
                     continue
-                tmux_send_text(name, text)
-                tmux_wait_busy(name)
-            finally:
+                if sess["agent"] == "hermes":
+                    hermes_send_text(sess, text)
+                    continue
+                name = sess.get("tmux")
+                if not name or not tmux_has(name):
+                    log(f"send dropped, tmux gone {sid}")
+                    continue
                 with _lock:
-                    _sending.discard(sid)
-        except Exception as exc:  # noqa: BLE001
-            log(f"send failed {sid}: {exc}")
+                    _sending.add(sid)
+                try:
+                    if not tmux_wait_sendable(sess, name):
+                        log(f"send dropped, tmux gone {sid}")
+                        continue
+                    tmux_send_text(name, text)
+                    tmux_wait_accepted(sess, name, text)
+                finally:
+                    with _lock:
+                        _sending.discard(sid)
+            except Exception as exc:  # noqa: BLE001
+                log(f"send failed {sid}: {exc}")
+        finally:
+            _pop_send_buf(sid, text)
 
 
 def stop_send_queue(sid: str) -> None:
     with _lock:
         q = _send_q.pop(sid, None)
         _send_workers.pop(sid, None)
+        _send_buf.pop(sid, None)
     if q is not None:
         try:
             q.put_nowait(None)
@@ -1386,6 +1464,7 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
         "choice": choice,
         "command": cmd,
         "messages": messages,
+        "queued": queued_sends(sess["id"]),
         "live": live,
         "pinned": native_is_pinned(*native_key(sess)),
     }
@@ -1418,7 +1497,8 @@ def fingerprint(sess: dict[str, Any]) -> str:
         last = msgs[-1] if msgs else {}
         return (
             f"oc:{oc_id}:{len(msgs)}:{last.get('id')}:{len(last.get('text') or '')}:"
-            f"{int(oc.session_busy(oc_id, cwd))}:{cid}:{sess.get('title') or ''}"
+            f"{int(oc.session_busy(oc_id, cwd))}:{cid}:{sess.get('title') or ''}:"
+            f"q:{_queued_fp(sess['id'])}"
         )
     if sess["agent"] == "hermes":
         hm_id = str(sess.get("hm_id") or "")
@@ -1426,7 +1506,8 @@ def fingerprint(sess: dict[str, Any]) -> str:
         last = msgs[-1] if msgs else {}
         return (
             f"hm:{hm_id}:{len(msgs)}:{last.get('id')}:{len(last.get('text') or '')}:"
-            f"{int(hm.session_busy(hm_id))}:{sess.get('title') or ''}"
+            f"{int(hm.session_busy(hm_id))}:{sess.get('title') or ''}:"
+            f"q:{_queued_fp(sess['id'])}"
         )
     path = ensure_transcript(sess)
     if not path:
@@ -1442,7 +1523,10 @@ def fingerprint(sess: dict[str, Any]) -> str:
         st = path.stat()
         subs = ",".join(s["id"] for s in session_subagents(sess))
         ch = (session_choice(sess) or {}).get("id") or ""
-        return f"{st.st_mtime}:{st.st_size}:{sess.get('title') or ''}:sa:{subs}:ch:{ch}"
+        return (
+            f"{st.st_mtime}:{st.st_size}:{sess.get('title') or ''}:"
+            f"sa:{subs}:ch:{ch}:q:{_queued_fp(sess['id'])}"
+        )
     except OSError:
         return str(path)
 
@@ -2430,6 +2514,7 @@ class Handler(BaseHTTPRequestHandler):
                                 )
                                 for m in (payload.get("messages") or [])
                             ],
+                            "q": [len(t) for t in (payload.get("queued") or [])],
                         },
                         ensure_ascii=False,
                     )

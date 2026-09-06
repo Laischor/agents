@@ -221,6 +221,9 @@ def parse_claude_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
             if rec.get("isSidechain") or rec.get("isMeta"):
                 continue
             typ = rec.get("type")
+            if typ == "queue-operation":
+                _apply_queue_operation(out, rec, i)
+                continue
             if typ not in ("user", "assistant"):
                 continue
             msg = rec.get("message") or {}
@@ -249,6 +252,34 @@ def parse_claude_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
                 }
             )
     return merge_turns(out)[-limit:]
+
+
+def _apply_queue_operation(out: list[dict[str, Any]], rec: dict[str, Any], i: int) -> None:
+    """Surface Claude's mid-turn queue as user bubbles (enqueue, then absorb)."""
+    op = str(rec.get("operation") or "")
+    text = str(rec.get("content") or "").strip()
+    if op == "enqueue":
+        if not text or is_injected_user_message(text):
+            return
+        out.append(
+            {
+                "id": rec.get("uuid") or f"q{i}",
+                "role": "user",
+                "text": text,
+                "parts": [{"type": "text", "text": text}],
+                "ts": rec.get("timestamp") or "",
+                "pending": True,
+            }
+        )
+        return
+    if op in ("remove", "dequeue"):
+        for msg in reversed(out):
+            if msg.get("role") != "user" or not msg.get("pending"):
+                continue
+            if text and (msg.get("text") or "") != text:
+                continue
+            msg["pending"] = False
+            break
 
 
 def _jsonl_tail_records(path: Path, max_bytes: int = 262144) -> list[dict[str, Any]]:
