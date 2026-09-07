@@ -1,7 +1,16 @@
 const $ = (id) => document.getElementById(id);
 
-const AGENT_LABEL = { claude: "Claude", cursor: "Cursor", opencode: "OpenCode", hermes: "Hermes" };
+const AGENT_LABEL = { claude: "Claude", cursor: "Cursor", opencode: "OpenCode", hermes: "Hermes", console: "Console" };
 const FILTER_KEY = "wrap.agentFilter";
+const CWD_KEY = "wrap.cwd";
+
+function readStoredCwd() {
+  try {
+    return localStorage.getItem(CWD_KEY) || null;
+  } catch {
+    return null;
+  }
+}
 
 function readAgentFilter() {
   try {
@@ -15,11 +24,12 @@ function readAgentFilter() {
 
 const state = {
   agent: "claude",
-  cwd: null,
+  cwd: readStoredCwd(),
   session: null,
   draft: false,
   es: null,
   paneOpen: false,
+  diffOpen: false,
   attachments: [],
   pingSid: "",
   catalog: {},
@@ -34,6 +44,8 @@ const state = {
   acked: {},
   sending: false,
   spawning: false,
+  diff: null,
+  diffFile: "",
 };
 
 const PENDING_KEY = "wrap.pending";
@@ -316,6 +328,325 @@ function renderDiff(text) {
     .join("\n");
 }
 
+const TERM_THEME = {
+  background: "#0e0f0b",
+  foreground: "#c9cbb8",
+  cursor: "#c4a35a",
+  cursorAccent: "#1a160c",
+  selectionBackground: "#34362b",
+  black: "#12130f",
+  red: "#c45c4a",
+  green: "#6f8f62",
+  yellow: "#c4a35a",
+  blue: "#7a8f9e",
+  magenta: "#a67c9e",
+  cyan: "#7ea39a",
+  white: "#ece7d5",
+  brightBlack: "#555748",
+  brightRed: "#e07a6a",
+  brightGreen: "#8fb88a",
+  brightYellow: "#e0c07a",
+  brightBlue: "#9bb0be",
+  brightMagenta: "#c49bb8",
+  brightCyan: "#a0c4bc",
+  brightWhite: "#f4f0e0",
+};
+
+let tuiX = null;
+let shX = null;
+let diffTimer = 0;
+const rawBuf = { tui: "", sh: "" };
+const rawTimer = { tui: 0, sh: 0 };
+
+function hasXterm() {
+  return (
+    typeof Terminal === "function" &&
+    typeof FitAddon !== "undefined" &&
+    typeof FitAddon.FitAddon === "function"
+  );
+}
+
+function isConsole(sess) {
+  return (sess || state.session)?.agent === "console";
+}
+
+function chatAgent() {
+  return state.agent === "console" ? "claude" : state.agent;
+}
+
+function activeCwd() {
+  return state.cwd || state.session?.cwd || "";
+}
+
+function persistCwd(cwd) {
+  state.cwd = cwd || null;
+  try {
+    if (state.cwd) localStorage.setItem(CWD_KEY, state.cwd);
+    else localStorage.removeItem(CWD_KEY);
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function makeTerm(el, kind) {
+  const term = new Terminal({
+    cursorBlink: true,
+    fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace',
+    fontSize: 13,
+    lineHeight: 1.2,
+    theme: TERM_THEME,
+    scrollback: 0,
+    allowProposedApi: false,
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(el);
+  term.onData((data) => queueRaw(kind, data));
+  const x = { term, fit, el, gen: 0 };
+  const ro = new ResizeObserver(() => {
+    if (el.offsetParent === null && el.getClientRects().length === 0) return;
+    fitResize(kind);
+  });
+  ro.observe(el);
+  return x;
+}
+
+function ensureTuiTerm() {
+  if (tuiX || !hasXterm()) return tuiX;
+  const el = $("tui-term");
+  if (!el) return null;
+  tuiX = makeTerm(el, "tui");
+  return tuiX;
+}
+
+function ensureShTerm() {
+  if (shX || !hasXterm()) return shX;
+  const el = $("console-term");
+  if (!el) return null;
+  shX = makeTerm(el, "sh");
+  return shX;
+}
+
+function paintScreen(x, screen) {
+  if (!x?.term || !screen) return;
+  x.gen += 1;
+  const gen = x.gen;
+  const cols = Math.max(2, Number(screen.cols) || x.term.cols);
+  const rows = Math.max(1, Number(screen.rows) || x.term.rows);
+  if (x.term.cols !== cols || x.term.rows !== rows) {
+    try {
+      x.term.resize(cols, rows);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  let lines = String(screen.screen || "").replace(/\r/g, "").split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  if (lines.length > rows) lines = lines.slice(0, rows);
+  const text = lines.join("\r\n");
+  x.term.reset();
+  x.term.write("\x1b[H" + text, () => {
+    if (gen !== x.gen) return;
+    const cx = Math.min(cols, Math.max(0, Number(screen.cx) || 0) + 1);
+    const cy = Math.min(rows, Math.max(0, Number(screen.cy) || 0) + 1);
+    x.term.write(`\x1b[${cy};${cx}H`);
+  });
+}
+
+function queueRaw(kind, data) {
+  rawBuf[kind] += data;
+  if (!rawTimer[kind]) rawTimer[kind] = setTimeout(() => flushRaw(kind), 16);
+}
+
+async function flushRaw(kind) {
+  rawTimer[kind] = 0;
+  const data = rawBuf[kind];
+  rawBuf[kind] = "";
+  if (!data) return;
+  try {
+    if (kind === "tui") {
+      if (!state.session?.id || !state.session?.tmux) return;
+      await api(`/api/sessions/${state.session.id}/input`, {
+        method: "POST",
+        body: JSON.stringify({ data }),
+      });
+    } else {
+      if (!isConsole() || !state.session?.id) return;
+      await api(`/api/sessions/${state.session.id}/input`, {
+        method: "POST",
+        body: JSON.stringify({ data }),
+      });
+    }
+  } catch (err) {
+    setStatus(err.message || String(err));
+  }
+}
+
+async function fitResize(kind) {
+  const x = kind === "tui" ? tuiX : shX;
+  if (!x?.fit) return;
+  if (x.el && (x.el.offsetWidth < 40 || x.el.offsetHeight < 40)) return;
+  try {
+    x.fit.fit();
+  } catch (_) {
+    return;
+  }
+  const cols = x.term.cols;
+  const rows = x.term.rows;
+  if (!cols || !rows) return;
+  try {
+    if (kind === "tui") {
+      if (!state.session?.id || !state.session?.tmux) return;
+      const out = await api(`/api/sessions/${state.session.id}/resize`, {
+        method: "POST",
+        body: JSON.stringify({ cols, rows }),
+      });
+      if (out.screen) paintScreen(tuiX, out.screen);
+    } else {
+      if (!isConsole() || !state.session?.id) return;
+      const out = await api(`/api/sessions/${state.session.id}/resize`, {
+        method: "POST",
+        body: JSON.stringify({ cols, rows }),
+      });
+      if (out.screen) paintScreen(shX, out.screen);
+    }
+  } catch (err) {
+    setStatus(err.message || String(err));
+  }
+}
+
+function showConsoleTerm(sess) {
+  if (!hasXterm()) {
+    setStatus("xterm.js failed to load");
+    return;
+  }
+  ensureShTerm();
+  const meta = $("console-meta");
+  if (meta) meta.textContent = projectName(sess?.cwd || "") || "";
+  if (sess?.screen) paintScreen(shX, sess.screen);
+  requestAnimationFrame(() => fitResize("sh"));
+  shX?.term?.focus();
+}
+
+function stopDiffPoll() {
+  if (diffTimer) {
+    clearInterval(diffTimer);
+    diffTimer = 0;
+  }
+}
+
+function diffLineHtml(line) {
+  return renderDiff(line);
+}
+
+function renderGitDiff() {
+  const filesEl = $("diff-files");
+  const pane = $("diff-pane");
+  const branch = $("diff-branch");
+  const meta = $("diff-meta");
+  const data = state.diff;
+  filesEl.innerHTML = "";
+  if (!data) {
+    branch.textContent = "—";
+    meta.textContent = "";
+    pane.innerHTML = `<span class="diff-file">Pick a project</span>`;
+    return;
+  }
+  if (!data.ok) {
+    branch.textContent = "git";
+    meta.textContent = data.error || "unavailable";
+    pane.innerHTML = `<span class="diff-del">${escapeHtml(data.error || "not a git repository")}</span>`;
+    return;
+  }
+  branch.textContent = data.branch || "(detached)";
+  const bits = [];
+  if (data.upstream) bits.push(data.upstream);
+  if (data.ahead) bits.push(`↑${data.ahead}`);
+  if (data.behind) bits.push(`↓${data.behind}`);
+  if (data.stat) bits.push(data.stat);
+  else if (!(data.files || []).length) bits.push("clean");
+  meta.textContent = bits.join(" · ");
+  const files = data.files || [];
+  if (!files.length) {
+    pane.innerHTML = `<span class="diff-file">working tree clean</span>`;
+    return;
+  }
+  if (!state.diffFile || !files.some((f) => f.path === state.diffFile)) {
+    state.diffFile = files[0].path;
+  }
+  for (const f of files) {
+    const li = document.createElement("li");
+    if (f.path === state.diffFile) li.className = "on";
+    const st = document.createElement("span");
+    st.className = "st " + (f.status === "?" ? "Q" : f.status || "M");
+    st.textContent = f.status || "M";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = f.path;
+    name.title = f.path;
+    li.appendChild(st);
+    li.appendChild(name);
+    li.addEventListener("click", () => {
+      state.diffFile = f.path;
+      renderGitDiff();
+    });
+    filesEl.appendChild(li);
+  }
+  const cur = files.find((f) => f.path === state.diffFile) || files[0];
+  if (cur.binary) {
+    pane.innerHTML = `<span class="diff-file">${escapeHtml(cur.path)} (binary)</span>`;
+    return;
+  }
+  if (!cur.diff) {
+    pane.innerHTML = `<span class="diff-file">${escapeHtml(cur.path)} — no textual diff</span>`;
+    return;
+  }
+  pane.innerHTML = diffLineHtml(cur.diff) + (cur.truncated ? `\n<span class="diff-file">… truncated</span>` : "");
+}
+
+async function loadDiff() {
+  const cwd = activeCwd();
+  const btn = $("btn-diff");
+  if (!cwd || isConsole()) {
+    state.diff = null;
+    if (btn) {
+      btn.hidden = true;
+      btn.classList.remove("on");
+    }
+    if (state.diffOpen) setDiffOpen(false);
+    return;
+  }
+  try {
+    state.diff = await api("/api/git?cwd=" + encodeURIComponent(cwd));
+    const n = (state.diff?.ok && state.diff.files) ? state.diff.files.length : 0;
+    if (btn) {
+      btn.hidden = n === 0 || state.diffOpen;
+      btn.textContent = n > 1 ? `Diff · ${n}` : "Diff";
+    }
+    if (state.diffOpen) renderGitDiff();
+    if (n === 0 && state.diffOpen) setDiffOpen(false);
+  } catch (err) {
+    state.diff = { ok: false, error: err.message || String(err) };
+    if (btn) btn.hidden = true;
+  }
+}
+
+function setDiffOpen(on) {
+  state.diffOpen = Boolean(on) && !isConsole();
+  if (state.diffOpen) {
+    state.paneOpen = false;
+    renderGitDiff();
+  }
+  applyChrome();
+}
+
+function watchDiff() {
+  stopDiffPoll();
+  if (!activeCwd() || isConsole()) return;
+  loadDiff();
+  diffTimer = setInterval(loadDiff, 2500);
+}
+
 const PASTE_IMG_RE = /(^|\s)(\/\S+\.wrap-pastes\/\S+\.(?:png|jpe?g|gif|webp))/gi;
 
 function renderMessageBody(text) {
@@ -362,8 +693,12 @@ async function api(path, opts = {}) {
 }
 
 function loadPrefs() {
+  return loadPrefsFor(chatAgent());
+}
+
+function loadPrefsFor(agent) {
   try {
-    return JSON.parse(localStorage.getItem(prefsKey(state.agent)) || "{}");
+    return JSON.parse(localStorage.getItem(prefsKey(agent)) || "{}");
   } catch {
     return {};
   }
@@ -371,7 +706,7 @@ function loadPrefs() {
 
 function savePrefs() {
   localStorage.setItem(
-    prefsKey(state.agent),
+    prefsKey(chatAgent()),
     JSON.stringify({
       model: $("model").value,
       effort: $("effort").value,
@@ -492,8 +827,8 @@ function applyCatalog() {
   fillAgents();
   if (!$("agent-filter").hidden) fillAgentFilter();
   syncFilterBtn();
-  const cat = state.catalog[state.agent] || { models: [], effort: [], fast: false };
-  const prefs = loadPrefs();
+  const cat = state.catalog[chatAgent()] || { models: [], effort: [], fast: false };
+  const prefs = loadPrefsFor(chatAgent());
   const model = state.session ? state.session.model || "" : prefs.model || "";
   const effort = state.session ? state.session.effort || "" : prefs.effort || "";
   const fast = state.session ? Boolean(state.session.fast) : Boolean(prefs.fast);
@@ -511,7 +846,7 @@ function fillAgents() {
     { id: "cursor", label: "Cursor" },
     { id: "opencode", label: "OpenCode" },
   ];
-  const current = state.agent || el.value;
+  const current = chatAgent() || el.value;
   el.innerHTML = "";
   for (const a of agents) {
     const opt = document.createElement("option");
@@ -527,26 +862,29 @@ function fillAgents() {
 }
 
 function fillProjects() {
-  const el = $("project");
-  const current = state.cwd || "";
-  el.innerHTML = "";
-  const blank = document.createElement("option");
-  blank.value = "";
-  blank.textContent = "Choose project…";
-  el.appendChild(blank);
-  for (const p of state.projects) {
-    const opt = document.createElement("option");
-    opt.value = p.path;
-    opt.textContent = p.name;
-    el.appendChild(opt);
+  const current = state.cwd || state.session?.cwd || "";
+  for (const id of ["project"]) {
+    const el = $(id);
+    if (!el) continue;
+    el.innerHTML = "";
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "Choose project…";
+    el.appendChild(blank);
+    for (const p of state.projects) {
+      const opt = document.createElement("option");
+      opt.value = p.path;
+      opt.textContent = p.name;
+      el.appendChild(opt);
+    }
+    if (current && ![...el.options].some((o) => o.value === current)) {
+      const opt = document.createElement("option");
+      opt.value = current;
+      opt.textContent = projectName(current);
+      el.appendChild(opt);
+    }
+    if ([...el.options].some((o) => o.value === current)) el.value = current;
   }
-  if (current && ![...el.options].some((o) => o.value === current)) {
-    const opt = document.createElement("option");
-    opt.value = current;
-    opt.textContent = projectName(current);
-    el.appendChild(opt);
-  }
-  if ([...el.options].some((o) => o.value === current)) el.value = current;
 }
 
 function setHash() {
@@ -556,7 +894,7 @@ function setHash() {
 }
 
 function canCompose() {
-  if (state.sending || state.spawning) return false;
+  if (state.sending || state.spawning || isConsole()) return false;
   if (state.session) return true;
   return state.draft && Boolean(state.cwd) && Boolean(state.agent);
 }
@@ -589,7 +927,7 @@ function applyChrome() {
   const viewing = Boolean(sess);
   const draft = state.draft && !viewing;
   $("session-bar").hidden = !draft;
-  $("input").disabled = !canCompose() || state.paneOpen;
+  $("input").disabled = !canCompose() || state.paneOpen || state.diffOpen;
   $("input").placeholder = draft
     ? "Send a message or paste a screenshot to start…"
     : viewing && !running
@@ -599,23 +937,32 @@ function applyChrome() {
         : sess?.agent === "hermes"
           ? "Message Hermes… paste a screenshot"
           : "Message the native CLI… paste a screenshot";
-  $("btn-send").disabled = !canCompose() || state.paneOpen;
-  $("btn-int").hidden = !running;
-  $("btn-clear").hidden = !(viewing && sess?.cwd && (sess?.agent || state.agent));
-  $("btn-stop").hidden = !running;
-  $("btn-pane").hidden = !(running && sess?.tmux);
-  $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && running));
-  if (running && sess?.tmux && state.paneOpen) {
+  $("btn-send").disabled = !canCompose() || state.paneOpen || state.diffOpen;
+  $("input").disabled = !canCompose() || state.paneOpen || state.diffOpen;
+  $("btn-int").hidden = !running || isConsole(sess);
+  $("btn-clear").hidden = !(viewing && sess?.cwd && sess?.agent && sess.agent !== "console");
+  $("btn-stop").hidden = !running || isConsole(sess);
+  $("btn-pane").hidden = !(running && sess?.tmux) || isConsole(sess);
+  $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && running && !isConsole(sess) && !state.diffOpen));
+  const showTui = running && sess?.tmux && state.paneOpen && !isConsole(sess) && !state.diffOpen;
+  if (showTui) {
     $("tui").hidden = false;
+    ensureTuiTerm();
   } else {
     $("tui").hidden = true;
   }
+  $("chat").hidden = isConsole(sess);
+  $("console").hidden = !isConsole(sess);
+  $("diff").hidden = !state.diffOpen || isConsole(sess);
+  $("composer").hidden = isConsole(sess);
+  const nDiff = (state.diff?.ok && state.diff.files) ? state.diff.files.length : 0;
+  $("btn-diff").hidden = isConsole(sess) || state.diffOpen || nDiff === 0;
   if (viewing) {
-    $("agent").value = sess.agent || state.agent;
-    if (sess.cwd) $("project").value = sess.cwd;
+    if (sess.agent && sess.agent !== "console") $("agent").value = sess.agent;
+    fillProjects();
   } else if (draft) {
-    $("agent").value = state.agent;
-    $("project").value = state.cwd || "";
+    $("agent").value = chatAgent();
+    fillProjects();
   } else {
     $("log").innerHTML = `<div class="empty">New session — then choose project and agent</div>`;
     state.paneOpen = false;
@@ -637,12 +984,15 @@ function openDraft() {
   state.session = null;
   state.draft = true;
   state.paneOpen = false;
+  state.diffOpen = false;
+  if (state.agent === "console") state.agent = "claude";
   applyCatalog();
   clearAttachments();
   $("log").innerHTML = `<div class="empty">Pick a project and agent, then send a message</div>`;
   setStatus("");
   applyChrome();
   renderSessions();
+  watchDiff();
   $("project").focus();
   closeMenu();
 }
@@ -655,14 +1005,16 @@ function clearMain() {
   state.session = null;
   state.draft = false;
   state.paneOpen = false;
+  state.diffOpen = false;
   clearAttachments();
   applyChrome();
   renderSessions();
+  watchDiff();
   if (isNarrow()) setMenuOpen(true);
 }
 
 function isWrapDefaultTitle(t) {
-  return / · (claude|cursor|opencode|hermes)( · |$)/i.test(t || "");
+  return / · (claude|cursor|opencode|hermes|console)( · |$)/i.test(t || "");
 }
 
 function sessionLabel(s) {
@@ -963,7 +1315,7 @@ async function loadHealth() {
 }
 
 function setAgent(agent) {
-  if (!agent || agent === state.agent) {
+  if (!agent || agent === "console" || agent === state.agent) {
     applyChrome();
     return;
   }
@@ -975,32 +1327,39 @@ function setAgent(agent) {
 }
 
 function setProject(cwd) {
-  state.cwd = cwd || null;
+  persistCwd(cwd || null);
+  fillProjects();
   applyChrome();
   renderSessions();
+  watchDiff();
 }
 
 function renderSession(sess) {
   state.session = sess;
   state.draft = false;
-  state.agent = sess.agent || state.agent;
-  state.cwd = sess.cwd || state.cwd;
+  if (sess.agent && sess.agent !== "console") state.agent = sess.agent;
+  persistCwd(sess.cwd || state.cwd);
   fillProjects();
   applyCatalog();
   setStatus("");
   seedQueued(sess);
-  renderMessages(mergeMessages(sess.messages || []));
-  if (sess.tmux) {
-    $("pane").textContent = sess.pane || "";
-    if (state.paneOpen) {
-      $("tui").hidden = false;
-      $("pane").scrollTop = $("pane").scrollHeight;
-    }
+  if (isConsole(sess)) {
+    state.paneOpen = false;
+    state.diffOpen = false;
+    showConsoleTerm(sess);
   } else {
-    setPaneOpen(false);
+    renderMessages(mergeMessages(sess.messages || []));
+    if (sess.tmux && sess.screen && state.paneOpen) {
+      ensureTuiTerm();
+      paintScreen(tuiX, sess.screen);
+      requestAnimationFrame(() => fitResize("tui"));
+    } else if (!sess.tmux) {
+      setPaneOpen(false);
+    }
   }
   applyChrome();
   renderSessions();
+  watchDiff();
   closeMenu();
 }
 
@@ -1211,14 +1570,17 @@ function connectStream(id) {
         const wasChoice = JSON.stringify(state.session.choice || null);
         state.session.busy = data.busy;
         state.session.pane = data.pane;
+        if (data.screen) state.session.screen = data.screen;
         if ("subagents" in data) state.session.subagents = data.subagents;
         if ("choice" in data) state.session.choice = data.choice;
         if (wasBusy !== data.busy || wasChoice !== JSON.stringify(data.choice || null)) {
-          renderMessages(mergeMessages(state.session.messages || []));
+          if (!isConsole()) renderMessages(mergeMessages(state.session.messages || []));
         }
       }
-      $("pane").textContent = data.pane || "";
-      if (state.paneOpen) $("pane").scrollTop = $("pane").scrollHeight;
+      if (data.screen) {
+        if (isConsole()) paintScreen(shX, data.screen);
+        else if (state.paneOpen) paintScreen(tuiX, data.screen);
+      }
       renderSessions();
     } catch (_) {
       /* ignore */
@@ -1226,6 +1588,11 @@ function connectStream(id) {
   });
   es.addEventListener("gone", () => {
     es.close();
+    if (isConsole()) {
+      clearMain();
+      loadSessions();
+      return;
+    }
     setStatus("session ended");
   });
 }
@@ -1325,7 +1692,7 @@ async function clearSession() {
     state.paneOpen = false;
     clearAttachments();
     state.agent = cfg.agent;
-    state.cwd = cfg.cwd;
+    persistCwd(cfg.cwd);
     fillProjects();
     applyCatalog();
     if ([...$("model").options].some((o) => o.value === (cfg.model || ""))) {
@@ -1359,7 +1726,7 @@ async function peekHistory(item) {
   }
   setStatus("");
   state.agent = item.agent;
-  state.cwd = item.cwd;
+  persistCwd(item.cwd);
   applyCatalog();
   try {
     const q = new URLSearchParams({
@@ -1619,14 +1986,19 @@ async function keys(list) {
 }
 
 function setPaneOpen(on) {
-  state.paneOpen = Boolean(on) && Boolean(state.session?.tmux);
+  state.paneOpen = Boolean(on) && Boolean(state.session?.tmux) && !isConsole();
+  if (state.paneOpen) state.diffOpen = false;
   $("tui").hidden = !state.paneOpen;
   $("btn-pane").classList.toggle("on", state.paneOpen);
-  $("input").disabled = !canCompose() || state.paneOpen;
-  $("btn-send").disabled = !canCompose() || state.paneOpen;
+  $("input").disabled = !canCompose() || state.paneOpen || state.diffOpen;
+  $("btn-send").disabled = !canCompose() || state.paneOpen || state.diffOpen;
   if (state.paneOpen) {
-    $("pane").focus();
-    $("pane").scrollTop = $("pane").scrollHeight;
+    ensureTuiTerm();
+    if (state.session?.screen) paintScreen(tuiX, state.session.screen);
+    requestAnimationFrame(() => {
+      fitResize("tui");
+      tuiX?.term?.focus();
+    });
   }
 }
 
@@ -1842,6 +2214,16 @@ $("log").addEventListener("click", (e) => {
 });
 $("agent").addEventListener("change", () => setAgent($("agent").value));
 $("project").addEventListener("change", () => setProject($("project").value));
+$("btn-console").addEventListener("click", async () => {
+  if (!state.cwd) {
+    setStatus("Pick a project first");
+    return;
+  }
+  await spawnSession({ agent: "console", cwd: state.cwd });
+});
+$("btn-diff").addEventListener("click", () => setDiffOpen(!state.diffOpen));
+$("btn-diff-close").addEventListener("click", () => setDiffOpen(false));
+$("btn-diff-refresh").addEventListener("click", () => loadDiff());
 $("model").addEventListener("change", savePrefs);
 $("effort").addEventListener("change", savePrefs);
 $("fast").addEventListener("change", savePrefs);
@@ -1899,10 +2281,11 @@ $("btn-int").addEventListener("click", async () => {
 $("btn-clear").addEventListener("click", () => {
   clearSession();
 });
-$("btn-stop").addEventListener("click", async () => {
+async function stopCurrentSession() {
   if (!state.session) return;
-  const stopMsg =
-    state.session.agent === "opencode"
+  const stopMsg = isConsole()
+    ? "Stop this console? The shell exits and it disappears from the list."
+    : state.session.agent === "opencode"
       ? "Close this OpenCode session in wrap? It stays in OpenCode history."
       : state.session.agent === "hermes"
         ? "Close this Hermes session in wrap? It stays in Hermes history."
@@ -1915,12 +2298,14 @@ $("btn-stop").addEventListener("click", async () => {
   } catch (err) {
     setStatus(err.message || String(err));
   }
-});
+}
+$("btn-stop").addEventListener("click", () => stopCurrentSession());
+$("btn-console-stop").addEventListener("click", () => stopCurrentSession());
 $("btn-pane").addEventListener("click", () => setPaneOpen(!state.paneOpen));
 $("btn-tui-close").addEventListener("click", () => setPaneOpen(false));
 $("tui").addEventListener("click", (e) => {
   if (e.target.closest("button")) return;
-  if (state.paneOpen) $("pane").focus();
+  if (state.paneOpen) tuiX?.term?.focus();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("agent-filter").hidden) {
@@ -1933,16 +2318,22 @@ document.addEventListener("keydown", (e) => {
     closeMenu();
     return;
   }
+  if (e.key === "Escape" && state.diffOpen) {
+    e.preventDefault();
+    setDiffOpen(false);
+    return;
+  }
   if (e.isComposing) return;
   if (!state.paneOpen || !state.session?.tmux) return;
+  if (hasXterm()) return;
   if (e.target.closest("button, textarea, input, select")) return;
   const k = mapTuiKey(e);
   if (!k) return;
   e.preventDefault();
   queueKey(k);
 });
-$("pane").addEventListener("mousedown", () => {
-  if (state.paneOpen) $("pane").focus();
+$("tui-term").addEventListener("mousedown", () => {
+  if (state.paneOpen) tuiX?.term?.focus();
 });
 document.addEventListener(
   "paste",
@@ -1955,6 +2346,7 @@ document.addEventListener(
     }
     if (state.paneOpen && state.session?.tmux) {
       if (e.target.closest("button, textarea, input, select")) return;
+      if (hasXterm()) return;
       const t = e.clipboardData?.getData("text") || "";
       if (!t) return;
       e.preventDefault();
@@ -2064,6 +2456,7 @@ Promise.all([loadCatalog(), loadProjects(), loadHealth(), loadSessions()]).then(
   const id = (location.hash || "#").slice(1);
   if (id) onHash();
   else if (isNarrow()) setMenuOpen(true);
+  watchDiff();
 });
 connectAlerts();
 setInterval(loadHealth, 15000);

@@ -86,7 +86,7 @@ The launcher starts the container if needed and sets the working directory 1:1 t
 
 The container starts wrap on `0.0.0.0:3000` (host: `http://127.0.0.1:3000`). Pick a project, choose model/effort, then **New** — several sessions per project and agent can run in parallel. A message is pasted into that session's live TUI (or posted to OpenCode / the Hermes gateway). Chat bubbles come from the CLI's own transcript, not a second agent.
 
-Pin a session with the thumbtack in the sidebar — pinned sessions stay at the top of the list after wrap restarts, even when they are closed.
+**Console** is a session type of its own (New → Console): a project `bash` in tmux, listed in the sidebar next to chat sessions. Stop removes it; there is no console history. **Diff** appears as a hover button at the top-right of Chat when the project working tree is dirty. Pin a session with the thumbtack in the sidebar — pinned sessions stay at the top of the list after wrap restarts, even when they are closed.
 
 ```bash
 open http://127.0.0.1:3000

@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
 import hermes as hm  # noqa: E402
 import opencode as oc  # noqa: E402
 import transcripts as tr  # noqa: E402
+import workspace as ws  # noqa: E402
 
 HOST = os.environ.get("WRAP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("WRAP_PORT", "3000"))
@@ -41,12 +42,13 @@ CURSOR_HOME = Path.home() / ".cursor"
 TMUX_SOCK = os.environ.get("WRAP_TMUX_SOCK", "/tmp/wrap.tmux.sock")
 STATIC = ROOT / "static"
 STATE_PATH = Path(os.environ.get("WRAP_STATE", "/var/lib/wrap/state.json"))
-AGENTS = ("claude", "cursor", "opencode", "hermes")
+AGENTS = ("claude", "cursor", "opencode", "hermes", "console")
 AGENT_LABELS = {
     "claude": "Claude",
     "cursor": "Cursor",
     "opencode": "OpenCode",
     "hermes": "Hermes",
+    "console": "Console",
 }
 # Status-line only. Avoid matching chat text ("thinking") or Claude's idle "⏵⏵ auto mode".
 BUSY_RE = re.compile(
@@ -154,7 +156,7 @@ def parse_tmux_name(name: str) -> tuple[str, str] | None:
         return None
     rest = name[len("wrap_") :]
     parts = rest.split("_", 1)
-    if len(parts) != 2 or parts[0] not in ("claude", "cursor"):
+    if len(parts) != 2 or parts[0] not in ("claude", "cursor", "console"):
         return None
     return parts[0], f"{parts[0]}-{parts[1]}"
 
@@ -484,6 +486,137 @@ def tmux_capture(name: str) -> str:
     if r.returncode != 0:
         return ""
     return tr.strip_ansi(r.stdout.decode("utf-8", "replace"))
+
+
+def tmux_screen(name: str) -> dict[str, Any]:
+    empty = {"screen": "", "cx": 0, "cy": 0, "cols": 80, "rows": 24}
+    if not name:
+        return empty
+    r = tmux("capture-pane", "-t", name, "-e", "-p")
+    screen = r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
+    d = tmux(
+        "display-message",
+        "-t",
+        name,
+        "-p",
+        "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height}",
+    )
+    cx = cy = 0
+    cols, rows = 80, 24
+    if d.returncode == 0:
+        parts = d.stdout.decode("utf-8", "replace").split()
+        if len(parts) >= 4:
+            try:
+                cx, cy, cols, rows = (int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]))
+            except ValueError:
+                pass
+    return {"screen": screen, "cx": cx, "cy": cy, "cols": cols, "rows": rows}
+
+
+def tmux_send_raw(name: str, data: str) -> None:
+    if not data:
+        return
+    chunk = 96
+    for i in range(0, len(data), chunk):
+        tmux("send-keys", "-t", name, "-l", "--", data[i : i + chunk])
+
+
+def tmux_resize(name: str, cols: int, rows: int) -> None:
+    cols = max(20, min(int(cols), 400))
+    rows = max(8, min(int(rows), 120))
+    tmux("set-option", "-t", name, "window-size", "manual")
+    tmux("resize-window", "-t", name, "-x", str(cols), "-y", str(rows))
+
+
+def console_tmux_name(cwd: Path) -> str:
+    digest = hashlib.sha1(str(cwd).encode("utf-8")).hexdigest()[:12]
+    return f"wrapsh_{digest}"
+
+
+def start_console_tmux(sid: str, cwd: Path, cols: int = 120, rows: int = 36) -> str:
+    if not tmux_ok():
+        raise RuntimeError("tmux is not installed — rebuild the agents image")
+    name = tmux_name(sid)
+    if tmux_has(name):
+        return name
+    cols = max(20, min(int(cols), 400))
+    rows = max(8, min(int(rows), 120))
+    r = tmux(
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-c",
+        str(cwd),
+        "-x",
+        str(cols),
+        "-y",
+        str(rows),
+        "-e",
+        "TERM=xterm-256color",
+        "--",
+        "bash",
+        "-l",
+    )
+    if r.returncode != 0:
+        err = r.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(f"console tmux failed: {err or r.returncode}")
+    tmux("set-option", "-t", name, "status", "off")
+    tmux("set-option", "-t", name, "window-size", "manual")
+    return name
+
+
+def sweep_legacy_consoles() -> None:
+    r = tmux("list-sessions", "-F", "#{session_name}")
+    if r.returncode != 0:
+        return
+    for name in r.stdout.decode("utf-8", "replace").splitlines():
+        if name.startswith("wrapsh_"):
+            tmux("kill-session", "-t", name)
+
+
+def ensure_console(cwd: Path, cols: int = 120, rows: int = 36) -> str:
+    if not tmux_ok():
+        raise RuntimeError("tmux is not installed — rebuild the agents image")
+    name = console_tmux_name(cwd)
+    if tmux_has(name):
+        return name
+    cols = max(20, min(int(cols), 400))
+    rows = max(8, min(int(rows), 120))
+    r = tmux(
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-c",
+        str(cwd),
+        "-x",
+        str(cols),
+        "-y",
+        str(rows),
+        "-e",
+        "TERM=xterm-256color",
+        "--",
+        "bash",
+        "-l",
+    )
+    if r.returncode != 0:
+        err = r.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(f"console tmux failed: {err or r.returncode}")
+    tmux("set-option", "-t", name, "status", "off")
+    tmux("set-option", "-t", name, "window-size", "manual")
+    return name
+
+
+def console_public(cwd: Path) -> dict[str, Any]:
+    name = ensure_console(cwd)
+    live = tmux_has(name)
+    return {
+        "cwd": str(cwd),
+        "tmux": name,
+        "live": live,
+        "screen": tmux_screen(name) if live else tmux_screen(""),
+    }
 
 
 def pane_busy(pane: str) -> bool:
@@ -851,6 +984,8 @@ def apply_native_title(
     registry: dict[str, dict[str, str]] | None = None,
 ) -> bool:
     """Replace wrap's placeholder title with the name the agent assigned."""
+    if sess.get("agent") == "console":
+        return False
     native = ""
     if sess.get("agent") == "opencode" and sess.get("oc_id"):
         native = oc.inferred_title(str(sess["oc_id"]), sess.get("cwd") or "")
@@ -1285,7 +1420,7 @@ def pick_transcript(sess: dict[str, Any]) -> Path | None:
 
 
 def ensure_transcript(sess: dict[str, Any]) -> Path | None:
-    if sess.get("agent") in ("opencode", "hermes"):
+    if sess.get("agent") in ("opencode", "hermes", "console"):
         return None
     found = pick_transcript(sess)
     if not found:
@@ -1375,7 +1510,11 @@ def catalog() -> dict[str, Any]:
         except RuntimeError as exc:
             log(f"hermes models: {exc}")
 
-    agents = [{"id": key, "label": AGENT_LABELS[key]} for key in AGENTS if key != "hermes" or hermes_on()]
+    agents = [
+        {"id": key, "label": AGENT_LABELS[key]}
+        for key in AGENTS
+        if key not in ("console", "hermes") or (key == "hermes" and hermes_on())
+    ]
     data = {
         "agents": agents,
         "claude": {
@@ -1448,9 +1587,11 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
     apply_native_title(sess, persist=True)
     pane = ""
     cmd = ""
+    screen: dict[str, Any] | None = None
     if sess.get("tmux"):
         pane = tmux_capture(sess["tmux"])
         cmd = tmux_alive_command(sess["tmux"])
+        screen = tmux_screen(str(sess["tmux"]))
     messages = load_messages(sess)
     live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or http_live(sess)
     subagents = session_subagents(sess)
@@ -1459,6 +1600,7 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
     return {
         **session_meta(sess),
         "pane": pane,
+        "screen": screen,
         "busy": busy,
         "subagents": subagents,
         "choice": choice,
@@ -1471,6 +1613,8 @@ def session_public(sess: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_messages(sess: dict[str, Any]) -> list[dict[str, Any]]:
+    if sess["agent"] == "console":
+        return []
     if sess["agent"] == "opencode":
         oc_id = sess.get("oc_id")
         if not oc_id:
@@ -2005,6 +2149,28 @@ def open_session(
         persist_state()
         return sess
 
+    if agent == "console":
+        name = start_console_tmux(sid, cwd)
+        sess = {
+            "id": sid,
+            "agent": "console",
+            "cwd": str(cwd),
+            "tmux": name,
+            "oc_id": None,
+            "hm_id": None,
+            "transcript": None,
+            "title": title,
+            "model": "",
+            "effort": "",
+            "fast": False,
+            "created": created,
+            "cli_session": "",
+        }
+        with _lock:
+            SESSIONS[sid] = sess
+        persist_state()
+        return sess
+
     if not tmux_ok():
         raise RuntimeError("tmux is not installed — rebuild the agents image")
 
@@ -2079,6 +2245,10 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
             changed = True
         live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or http_live(sess)
         if not live:
+            if sess.get("agent") == "console":
+                with _lock:
+                    SESSIONS.pop(str(sess.get("id") or ""), None)
+                changed = True
             continue
         subagents = session_subagents(sess)
         pane = tmux_capture(sess["tmux"]) if sess.get("tmux") else ""
@@ -2166,14 +2336,16 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/", "/index.html"):
                 return self._static("index.html", "text/html; charset=utf-8")
             if path.startswith("/static/"):
-                name = Path(path[len("/static/") :]).name
+                rel = path[len("/static/") :]
+                suffix = Path(rel).suffix.lower()
                 ctype = {
                     ".css": "text/css; charset=utf-8",
                     ".js": "application/javascript; charset=utf-8",
                     ".svg": "image/svg+xml",
                     ".html": "text/html; charset=utf-8",
-                }.get(Path(name).suffix, "application/octet-stream")
-                return self._static(name, ctype)
+                    ".map": "application/json",
+                }.get(suffix, "application/octet-stream")
+                return self._static(rel, ctype)
             if path == "/api/health":
                 body = {
                     "ok": True,
@@ -2213,6 +2385,17 @@ class Handler(BaseHTTPRequestHandler):
                 cwd = safe_cwd(str((qs.get("cwd") or [""])[0] or ""))
                 st, raw, ct = json_bytes(history_public(agent, native, cwd))
                 return self._send(st, raw, ct)
+            if path == "/api/git":
+                cwd = safe_cwd((qs.get("cwd") or [""])[0])
+                st, raw, ct = json_bytes(ws.git_view(cwd, HOST_PROJECTS))
+                return self._send(st, raw, ct)
+            if path == "/api/console":
+                cwd = safe_cwd((qs.get("cwd") or [""])[0])
+                st, raw, ct = json_bytes(console_public(cwd))
+                return self._send(st, raw, ct)
+            if path == "/api/console/stream":
+                cwd = safe_cwd((qs.get("cwd") or [""])[0])
+                return self._console_stream(cwd)
             if path == "/api/file":
                 raw_path = (qs.get("path") or [""])[0]
                 p = safe_paste_file(raw_path)
@@ -2237,7 +2420,13 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/sessions/([^/]+)/pane", path)
             if m:
                 sess = get_session(m.group(1))
-                st, raw, ct = json_bytes({"pane": tmux_capture(sess["tmux"]) if sess.get("tmux") else ""})
+                name = sess.get("tmux")
+                st, raw, ct = json_bytes(
+                    {
+                        "pane": tmux_capture(name) if name else "",
+                        "screen": tmux_screen(str(name)) if name else None,
+                    }
+                )
                 return self._send(st, raw, ct)
             m = re.fullmatch(r"/api/sessions/([^/]+)", path)
             if m:
@@ -2273,6 +2462,18 @@ class Handler(BaseHTTPRequestHandler):
                     str(data.get("sid") or ""),
                 )
                 st, raw, ct = json_bytes({"ok": True, **item})
+                return self._send(st, raw, ct)
+            if path == "/api/console/input":
+                cwd = safe_cwd(str(data.get("cwd") or ""))
+                name = ensure_console(cwd)
+                tmux_send_raw(name, str(data.get("data") or ""))
+                st, raw, ct = json_bytes({"ok": True})
+                return self._send(st, raw, ct)
+            if path == "/api/console/resize":
+                cwd = safe_cwd(str(data.get("cwd") or ""))
+                name = ensure_console(cwd)
+                tmux_resize(name, int(data.get("cols") or 120), int(data.get("rows") or 36))
+                st, raw, ct = json_bytes({"ok": True, "screen": tmux_screen(name)})
                 return self._send(st, raw, ct)
             if path == "/api/history/hide":
                 hide_history(str(data.get("agent") or ""), str(data.get("native") or ""))
@@ -2321,6 +2522,22 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("keys must be a non-empty list")
                 tmux_send_keys(sess["tmux"], [str(k) for k in keys])
                 st, raw, ct = json_bytes({"ok": True})
+                return self._send(st, raw, ct)
+            m = re.fullmatch(r"/api/sessions/([^/]+)/input", path)
+            if m:
+                sess = get_session(m.group(1))
+                if not sess.get("tmux"):
+                    raise RuntimeError("no tmux pane for this session")
+                tmux_send_raw(str(sess["tmux"]), str(data.get("data") or ""))
+                st, raw, ct = json_bytes({"ok": True})
+                return self._send(st, raw, ct)
+            m = re.fullmatch(r"/api/sessions/([^/]+)/resize", path)
+            if m:
+                sess = get_session(m.group(1))
+                if not sess.get("tmux"):
+                    raise RuntimeError("no tmux pane for this session")
+                tmux_resize(str(sess["tmux"]), int(data.get("cols") or 140), int(data.get("rows") or 48))
+                st, raw, ct = json_bytes({"ok": True, "screen": tmux_screen(str(sess["tmux"]))})
                 return self._send(st, raw, ct)
             m = re.fullmatch(r"/api/sessions/([^/]+)/interrupt", path)
             if m:
@@ -2405,9 +2622,13 @@ class Handler(BaseHTTPRequestHandler):
             st, raw, ct = json_bytes({"error": str(exc)}, 500)
             self._send(st, raw, ct)
 
-    def _static(self, name: str, content_type: str) -> None:
-        path = STATIC / name
-        if not path.is_file() or path.resolve().parent != STATIC.resolve():
+    def _static(self, rel: str, content_type: str) -> None:
+        if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+            self._send(404, b"not found", "text/plain")
+            return
+        root = STATIC.resolve()
+        path = (STATIC / rel).resolve()
+        if not path.is_file() or not path.is_relative_to(root):
             self._send(404, b"not found", "text/plain")
             return
         body = path.read_bytes()
@@ -2424,6 +2645,8 @@ class Handler(BaseHTTPRequestHandler):
         elif sess["agent"] == "hermes":
             if not sess.get("hm_id"):
                 raise RuntimeError("no hermes session")
+        elif sess["agent"] == "console":
+            raise RuntimeError("console has no chat")
         elif not sess.get("tmux") or not tmux_has(sess["tmux"]):
             raise RuntimeError("tmux session is gone")
         enqueue_send(sid, text)
@@ -2530,22 +2753,26 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 fp = fingerprint(sess)
                 pane = tmux_capture(sess["tmux"]) if sess.get("tmux") else ""
+                screen = tmux_screen(str(sess["tmux"])) if sess.get("tmux") else None
                 subagents = session_subagents(sess)
                 choice = session_choice(sess, pane)
                 busy = session_is_working(sess, pane) or bool(subagents) or bool(choice)
-                pane_key = (pane, busy, tuple(s["id"] for s in subagents), (choice or {}).get("id"))
+                pane_key = (
+                    pane,
+                    busy,
+                    tuple(s["id"] for s in subagents),
+                    (choice or {}).get("id"),
+                    (screen or {}).get("screen"),
+                    (screen or {}).get("cx"),
+                    (screen or {}).get("cy"),
+                )
                 if fp != last:
                     last = fp
                     payload = session_public(sess)
                     chunk = f"event: sync\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     self.wfile.write(chunk.encode("utf-8"))
                     self.wfile.flush()
-                    last_pane = (
-                        payload.get("pane"),
-                        bool(payload.get("busy")),
-                        tuple(s.get("id") for s in (payload.get("subagents") or [])),
-                        (payload.get("choice") or {}).get("id"),
-                    )
+                    last_pane = pane_key
                 elif pane_key != last_pane:
                     last_pane = pane_key
                     chunk = (
@@ -2553,6 +2780,7 @@ class Handler(BaseHTTPRequestHandler):
                         + json.dumps(
                             {
                                 "pane": pane,
+                                "screen": screen,
                                 "busy": busy,
                                 "subagents": subagents,
                                 "choice": choice,
@@ -2567,11 +2795,41 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
             return
 
+    def _console_stream(self, cwd: Path) -> None:
+        name = ensure_console(cwd)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        last = None
+        try:
+            while True:
+                if not tmux_has(name):
+                    try:
+                        name = ensure_console(cwd)
+                    except RuntimeError:
+                        self.wfile.write(b"event: gone\ndata: {}\n\n")
+                        self.wfile.flush()
+                        return
+                screen = tmux_screen(name)
+                key = (screen.get("screen"), screen.get("cx"), screen.get("cy"), screen.get("cols"), screen.get("rows"))
+                if key != last:
+                    last = key
+                    chunk = "event: screen\ndata: " + json.dumps(screen, ensure_ascii=False) + "\n\n"
+                    self.wfile.write(chunk.encode("utf-8"))
+                    self.wfile.flush()
+                time.sleep(0.12)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+            return
+
 
 def main() -> None:
     STATIC.mkdir(parents=True, exist_ok=True)
     load_state()
     discover_tmux()
+    sweep_legacy_consoles()
     install_cmux_shim()
     if shutil_which("opencode"):
         threading.Thread(target=_oc_warmup, daemon=True, name="wrap-oc-warmup").start()

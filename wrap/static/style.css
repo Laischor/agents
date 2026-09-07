@@ -267,6 +267,113 @@ main {
   text-transform: none; letter-spacing: 0; font-size: 12px;
   padding-bottom: 6px;
 }
+#btn-console {
+  align-self: flex-end;
+}
+
+#composer[hidden], #chat[hidden], #console[hidden], #diff[hidden] {
+  display: none !important;
+}
+
+#console {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  background: #0e0f0b;
+}
+#console header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+#console header strong {
+  font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em;
+}
+#console header span { color: var(--muted); font-size: 12px; margin-right: auto; }
+.term {
+  flex: 1; min-height: 0; min-width: 0;
+  padding: 8px;
+}
+.term .xterm { height: 100%; }
+.term .xterm-viewport { overflow-y: auto !important; }
+
+#btn-diff {
+  position: absolute;
+  top: 12px;
+  right: 18px;
+  z-index: 5;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+#chat:hover #btn-diff:not([hidden]),
+#btn-diff:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+#chat:has(#diff:not([hidden])) #btn-diff {
+  display: none !important;
+}
+
+#diff {
+  position: absolute; inset: 0;
+  background: var(--bg-2);
+  display: flex; flex-direction: column;
+  z-index: 3;
+  overflow: hidden;
+}
+#diff-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+#diff-head strong {
+  font-family: var(--mono); font-size: 13px;
+}
+#diff-meta { font-size: 12px; margin-left: 10px; }
+.diff-actions { display: flex; gap: 6px; }
+#diff-body {
+  flex: 1; min-height: 0;
+  display: flex;
+}
+#diff-files {
+  list-style: none; margin: 0; padding: 8px;
+  width: 240px; flex: 0 0 240px;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+  background: var(--bg-3);
+}
+#diff-files li {
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 6px 8px; border-radius: 6px;
+  cursor: pointer; font-size: 12px;
+  font-family: var(--mono);
+}
+#diff-files li:hover, #diff-files li.on { background: var(--bg-2); }
+#diff-files .st {
+  flex: 0 0 1.2em; font-weight: 700; font-size: 11px;
+}
+#diff-files .st.M { color: var(--accent); }
+#diff-files .st.A, #diff-files .st.Q { color: var(--accent-2); }
+#diff-files .st.D { color: var(--danger); }
+#diff-files .st.U { color: var(--danger); }
+#diff-files .name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.diff-pane {
+  flex: 1; min-width: 0; margin: 0; overflow: auto;
+  padding: 10px 12px;
+  background: #0e0f0b; color: #c9cbb8;
+  font-family: var(--mono); font-size: 12px; line-height: 1.45;
+  white-space: pre;
+}
+.diff-pane .diff-add { color: #8fb88a; }
+.diff-pane .diff-del { color: #c45c4a; }
+.diff-pane .diff-hunk { color: var(--accent); }
+.diff-pane .diff-file { color: var(--muted); }
+.diff-pane .diff-ctx { color: #c9cbb8; }
 
 .ghost, #btn-send, #btn-int, .primary {
   font: inherit; cursor: pointer;
@@ -309,17 +416,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em;
 }
 #tui header span { color: var(--muted); font-size: 12px; margin-right: auto; }
-#pane {
-  flex: 1; margin: 0; max-height: none; overflow: auto;
-  background: #0e0f0b; color: #c9cbb8; font-family: var(--mono); font-size: 13px;
-  padding: 12px 14px; border: 0; outline: none;
-  white-space: pre-wrap; word-break: break-word;
-  cursor: text; caret-color: var(--accent);
-}
-#pane:focus {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
-}
+#tui-term { flex: 1; min-height: 0; padding: 8px; }
 #btn-pane.on {
   background: var(--accent); color: #1a160c; border-color: var(--accent);
 }
@@ -629,7 +726,17 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   #session-bar {
     padding: 12px 14px;
   }
+  #diff-body { flex-direction: column; }
+  #diff-files {
+    width: auto; flex: 0 0 auto; max-height: 28vh;
+    border-right: 0; border-bottom: 1px solid var(--line);
+  }
   #session-bar select { min-width: 0; flex: 1; width: 100%; }
+  #btn-console { width: 100%; }
+  #chat #btn-diff:not([hidden]) {
+    opacity: 1;
+    pointer-events: auto;
+  }
   .log { padding: 14px 14px 10px; -webkit-overflow-scrolling: touch; }
   #lists { -webkit-overflow-scrolling: touch; }
   #session-bar select, #input, #search { font-size: 16px; }

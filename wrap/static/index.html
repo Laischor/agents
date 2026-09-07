@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="dark" />
   <title>wrap — native sessions</title>
-  <link rel="stylesheet" href="/static/style.css?v=31" />
+  <link rel="stylesheet" href="/static/vendor/xterm.css?v=35" />
+  <link rel="stylesheet" href="/static/style.css?v=35" />
 </head>
 <body>
   <div id="scrim" hidden></div>
@@ -58,17 +59,43 @@
         <input type="checkbox" id="fast" />
         Fast
       </label>
+      <button type="button" id="btn-console" class="ghost">Console</button>
     </div>
     <div id="chat">
+      <button type="button" id="btn-diff" class="ghost tiny" hidden>Diff</button>
       <section id="log" class="log"></section>
       <div id="tui" hidden>
         <header>
           <strong>TUI</strong>
-          <span>type or paste a screenshot — keys go to the CLI</span>
+          <span>agent CLI — keys go to tmux</span>
           <button type="button" id="btn-tui-close" class="ghost tiny">Close</button>
         </header>
-        <pre id="pane" tabindex="0"></pre>
+        <div id="tui-term" class="term"></div>
       </div>
+      <div id="diff" hidden>
+        <header id="diff-head">
+          <div>
+            <strong id="diff-branch">—</strong>
+            <span id="diff-meta" class="muted"></span>
+          </div>
+          <div class="diff-actions">
+            <button type="button" id="btn-diff-refresh" class="ghost tiny">Refresh</button>
+            <button type="button" id="btn-diff-close" class="ghost tiny">Close</button>
+          </div>
+        </header>
+        <div id="diff-body">
+          <ul id="diff-files"></ul>
+          <pre id="diff-pane" class="diff-pane" tabindex="0"></pre>
+        </div>
+      </div>
+    </div>
+    <div id="console" hidden>
+      <header>
+        <strong>Console</strong>
+        <span id="console-meta" class="muted"></span>
+        <button type="button" id="btn-console-stop" class="ghost tiny danger">Stop</button>
+      </header>
+      <div id="console-term" class="term"></div>
     </div>
     <p id="status" hidden></p>
     <form id="composer">
@@ -85,6 +112,8 @@
       </div>
     </form>
   </main>
-  <script src="/static/app.js?v=31"></script>
+  <script src="/static/vendor/xterm.min.js?v=35"></script>
+  <script src="/static/vendor/addon-fit.min.js?v=35"></script>
+  <script src="/static/app.js?v=35"></script>
 </body>
 </html>
