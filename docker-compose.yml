@@ -11,6 +11,7 @@ services:
     # Cursor/Claude sessions in the agents container.
     depends_on:
       - firecrawl
+      - searxng
     command: ["gateway", "run"]
     ports:
       - "127.0.0.1:8642:8642"     # gateway API / health
@@ -30,6 +31,8 @@ services:
       # Also persisted in data/hermes/.env so get_env_value sees it.
       FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-http://firecrawl:3002}
       FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+      # Compose-network URL — Hermes web_search backend (search_backend: searxng)
+      SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
       # macOS: gh stores OAuth in Keychain — start.sh/run.sh inject via `gh auth token`.
       # Hermes Skills Hub / github-auth read GITHUB_TOKEN (GH_TOKEN is the gh CLI name).
       GH_TOKEN: ${GH_TOKEN:-}
@@ -80,6 +83,29 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Metasearch for Hermes web_search (search_backend: searxng) — scrapes the
+  # same public engines (startpage, brave, ddg, ...) but server-side, so the
+  # container's egress IP gets rate-limited instead of the dev machine's.
+  # JSON API enabled via config/searxng/settings.yml.
+  searxng:
+    profiles: ["hermes", "firecrawl"]
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"   # host curl / browser smoke-test
+    volumes:
+      - ./config/searxng:/etc/searxng:rw
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
 
   agents:
     build:
