@@ -214,12 +214,19 @@ function renderMdBlocks(src) {
     }
     const listItem = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
     if (listItem) {
+      const indent = listItem[1];
       const ordered = /^\d/.test(listItem[2]);
+      const start = ordered ? parseInt(listItem[2], 10) || 1 : 1;
       const items = [];
       while (i < lines.length) {
-        const m = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+        let j = i;
+        while (j < lines.length && !String(lines[j]).trim()) j++;
+        if (j >= lines.length) break;
+        const m = lines[j].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
         if (!m) break;
         if (/^\d/.test(m[2]) !== ordered) break;
+        if (m[1].length !== indent.length) break;
+        i = j;
         let text = m[3];
         i++;
         while (i < lines.length) {
@@ -234,8 +241,9 @@ function renderMdBlocks(src) {
         items.push(text);
       }
       const tag = ordered ? "ol" : "ul";
+      const startAttr = ordered && start > 1 ? ` start="${start}"` : "";
       out.push(
-        `<${tag}>${items.map((t) => `<li>${inlineMd(t)}</li>`).join("")}</${tag}>`,
+        `<${tag}${startAttr}>${items.map((t) => `<li>${inlineMd(t)}</li>`).join("")}</${tag}>`,
       );
       continue;
     }
