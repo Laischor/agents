@@ -87,6 +87,13 @@ PANE_OPT_NUM_RE = re.compile(r"^[❯►>\s]*(\d+)\.\s+(\S.*)$")
 PANE_OPT_CHECK_RE = re.compile(r"^[❯►›>\s]*\[\s*[xX ]?\s*\]\s+(\S.*)$")
 PANE_OTHER_OPT_RE = re.compile(r"^Other:\s*\(", re.I)
 PANE_QNUM_RE = re.compile(r"^(\d+)\.\s+(\S.*)$")
+# Cursor TUI prompt. Resume paints `→` during "Loading conversation" — paste
+# then works, but Enter is dropped. Wait until loading is gone.
+CURSOR_LOADING_RE = re.compile(r"Loading conversation|Resuming (?:chat|session)", re.I)
+CURSOR_COMPOSER_RE = re.compile(
+    r"Add a follow-up|Plan, search, build anything|[→➜▸►]\s|Ask Cursor",
+    re.I,
+)
 ALERT_SETTLE_SEC = 6.0
 ALERT_REPLAY_SEC = 45.0
 BUSY_HOLD_SEC = 2.5
@@ -1024,6 +1031,7 @@ def start_tmux(
     title: str,
     cli_session: str = "",
     resume_id: str = "",
+    prompt: str = "",
 ) -> str:
     name = tmux_name(sid)
     if tmux_has(name):
@@ -1055,6 +1063,11 @@ def start_tmux(
             args.extend(["--model", model_arg])
         if resume_id:
             args.append(f"--resume={resume_id}")
+        prompt = (prompt or "").strip()
+        if prompt:
+            # First message as argv — Cursor submits it after resume load.
+            # tmux paste+Enter during "Loading conversation" leaves text unsent.
+            args.extend(["--", prompt])
         extra_env = {
             "TERM": "xterm-256color",
             "DISPLAY": os.environ.get("DISPLAY", ":0"),
@@ -1110,21 +1123,47 @@ def cursor_model_arg(model: str, effort: str, fast: bool) -> str:
     return f"{model}[{','.join(opts)}]"
 
 
-def tmux_ready_for_send(sess: dict[str, Any], name: str) -> bool:
+def cursor_composer_ready(pane: str) -> bool:
+    text = pane or ""
+    if CURSOR_LOADING_RE.search(text):
+        return False
+    return bool(CURSOR_COMPOSER_RE.search(text))
+
+
+def cursor_composer_has_text(pane: str, text: str) -> bool:
+    first = ""
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if s:
+            first = s[:80]
+            break
+    if len(first) < 4:
+        return True
+    tail = "\n".join((pane or "").splitlines()[-20:])
+    return first in tail
+
+
+def tmux_ready_for_send(sess: dict[str, Any], name: str, pane: str | None = None) -> bool:
     """True when paste+Enter reaches the composer (idle or native mid-turn queue).
 
     Do not wait for the turn to finish — Claude/Cursor absorb a follow-up while
     working. Only block on a choice/permission overlay, where paste would answer it.
+    Cursor also needs its prompt line (`→` / Add a follow-up) or resume drops Enter.
     """
     if not name or not tmux_has(name):
         return False
-    pane = tmux_capture(name)
-    return session_choice(sess, pane) is None
+    text = pane if pane is not None else tmux_capture(name)
+    if session_choice(sess, text) is not None:
+        return False
+    if sess.get("agent") == "cursor" and not cursor_composer_ready(text):
+        return False
+    return True
 
 
 def tmux_wait_sendable(sess: dict[str, Any], name: str) -> bool:
     """Block until paste is safe. False if tmux/session is gone."""
     sid = str(sess.get("id") or "")
+    started = time.time()
     while True:
         try:
             sess = get_session(sid)
@@ -1133,7 +1172,17 @@ def tmux_wait_sendable(sess: dict[str, Any], name: str) -> bool:
         name = str(sess.get("tmux") or name)
         if not name or not tmux_has(name):
             return False
-        if tmux_ready_for_send(sess, name):
+        pane = tmux_capture(name)
+        if session_choice(sess, pane) is not None:
+            time.sleep(0.3)
+            continue
+        if sess.get("agent") == "cursor" and not cursor_composer_ready(pane):
+            if time.time() - started > 60:
+                log(f"cursor composer wait timed out {sid}")
+                return True
+            time.sleep(0.3)
+            continue
+        if tmux_ready_for_send(sess, name, pane):
             time.sleep(0.15)
             try:
                 sess = get_session(sid)
@@ -1181,7 +1230,7 @@ def tmux_wait_accepted(sess: dict[str, Any], name: str, text: str, timeout: floa
     return False
 
 
-def tmux_send_text(name: str, text: str) -> None:
+def tmux_send_text(name: str, text: str, *, agent: str = "") -> None:
     """Clear leftover composer text, paste as one block, then submit."""
     tmux("send-keys", "-t", name, "C-u")
     time.sleep(0.08)
@@ -1193,7 +1242,17 @@ def tmux_send_text(name: str, text: str) -> None:
     if r.returncode != 0:
         tmux("delete-buffer", "-b", buf)
         raise RuntimeError(r.stderr.decode("utf-8", "replace") or "paste-buffer failed")
-    time.sleep(0.25)
+    if agent == "cursor":
+        deadline = time.time() + 6.0
+        landed = False
+        while time.time() < deadline:
+            if cursor_composer_has_text(tmux_capture(name), text):
+                landed = True
+                break
+            time.sleep(0.1)
+        time.sleep(0.08 if landed else 0.4)
+    else:
+        time.sleep(0.25)
     tmux("send-keys", "-t", name, "Enter")
 
 
@@ -1297,11 +1356,23 @@ def _drain_sends(sid: str) -> None:
                 with _lock:
                     _sending.add(sid)
                 try:
+                    agent = str(sess.get("agent") or "")
+                    boot = str(sess.get("boot_prompt") or "").strip()
+                    if agent == "cursor" and boot and text.strip() == boot:
+                        with _lock:
+                            sess["boot_prompt"] = ""
+                        log(f"cursor argv prompt {sid}")
+                        tmux_wait_accepted(sess, name, text)
+                        continue
                     if not tmux_wait_sendable(sess, name):
                         log(f"send dropped, tmux gone {sid}")
                         continue
-                    tmux_send_text(name, text)
-                    tmux_wait_accepted(sess, name, text)
+                    tmux_send_text(name, text, agent=agent)
+                    if not tmux_wait_accepted(sess, name, text, timeout=6.0):
+                        if agent == "cursor":
+                            log(f"cursor enter retry {sid}")
+                            tmux("send-keys", "-t", name, "Enter")
+                        tmux_wait_accepted(sess, name, text)
                 finally:
                     with _lock:
                         _sending.discard(sid)
@@ -2085,12 +2156,14 @@ def open_session(
     fast: bool = False,
     title: str = "",
     resume_id: str = "",
+    prompt: str = "",
 ) -> dict[str, Any]:
     if agent not in AGENTS:
         raise ValueError(f"unknown agent: {agent}")
     if agent == "hermes" and not hermes_on():
         raise ValueError("Hermes is disabled — set HERMES=1 in .env")
     resume_id = (resume_id or "").strip()
+    prompt = (prompt or "").strip()
     if resume_id:
         existing = find_live_native(agent, resume_id, cwd)
         if existing:
@@ -2186,6 +2259,7 @@ def open_session(
         title=user_title,
         cli_session=cli_session if not resume_id else "",
         resume_id=resume_id,
+        prompt=prompt if agent == "cursor" else "",
     )
     path = wait_transcript(
         agent,
@@ -2209,6 +2283,7 @@ def open_session(
         "effort": effort,
         "fast": fast,
         "created": created,
+        "boot_prompt": prompt if agent == "cursor" else "",
     }
     with _lock:
         SESSIONS[sid] = sess
@@ -2506,6 +2581,7 @@ class Handler(BaseHTTPRequestHandler):
                     fast=bool(data.get("fast")),
                     title=str(data.get("title") or ""),
                     resume_id=str(data.get("resume") or ""),
+                    prompt=str(data.get("text") or ""),
                 )
                 st, raw, ct = json_bytes(session_public(sess), 201)
                 return self._send(st, raw, ct)

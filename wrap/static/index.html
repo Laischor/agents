@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="dark" />
   <title>wrap — native sessions</title>
-  <link rel="stylesheet" href="/static/vendor/xterm.css?v=38" />
-  <link rel="stylesheet" href="/static/style.css?v=38" />
+  <link rel="stylesheet" href="/static/vendor/xterm.css?v=42" />
+  <link rel="stylesheet" href="/static/style.css?v=42" />
 </head>
 <body>
   <div id="scrim" hidden></div>
@@ -17,6 +17,9 @@
         <strong>wrap</strong>
         <span>native sessions</span>
       </div>
+      <button type="button" id="btn-settings" class="ghost" aria-label="Settings" aria-pressed="false" title="Settings">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M6.5 1.13a.75.75 0 0 1 .67-.38h1.66c.3 0 .58.18.68.46l.32.9c.34.08.67.2.98.36l.82-.48a.75.75 0 0 1 .9.12l1.18 1.18c.22.22.27.55.12.84l-.48.82c.16.31.28.64.36.98l.9.32c.28.1.46.37.46.68v1.66a.75.75 0 0 1-.46.68l-.9.32a4.7 4.7 0 0 1-.36.98l.48.82a.75.75 0 0 1-.12.9l-1.18 1.18a.75.75 0 0 1-.84.12l-.82-.48a4.7 4.7 0 0 1-.98.36l-.32.9a.75.75 0 0 1-.68.46H7.17a.75.75 0 0 1-.68-.46l-.32-.9a4.7 4.7 0 0 1-.98-.36l-.82.48a.75.75 0 0 1-.9-.12L2.29 11.7a.75.75 0 0 1-.12-.84l.48-.82a4.7 4.7 0 0 1-.36-.98l-.9-.32A.75.75 0 0 1 .93 8.08V6.42c0-.3.18-.58.46-.68l.9-.32c.08-.34.2-.67.36-.98l-.48-.82a.75.75 0 0 1 .12-.9L3.47 1.54a.75.75 0 0 1 .84-.12l.82.48c.31-.16.64-.28.98-.36l.32-.9a.75.75 0 0 1 .07-.08ZM8 10.5A2.5 2.5 0 1 0 8 5.5a2.5 2.5 0 0 0 0 5Z" clip-rule="evenodd"/></svg>
+      </button>
     </header>
     <h2>Sessions <button type="button" id="btn-new" class="ghost tiny">New</button></h2>
     <div id="search-row">
@@ -87,6 +90,16 @@
     <div id="console" hidden>
       <div id="console-term" class="term"></div>
     </div>
+    <section id="settings" hidden>
+      <header id="settings-head">
+        <div>
+          <strong>Defaults</strong>
+          <p class="lead">Per agent, used for new chats and when resuming a closed session. Stored in this browser.</p>
+        </div>
+        <button type="button" id="btn-settings-close" class="ghost tiny">Close</button>
+      </header>
+      <div id="settings-agents"></div>
+    </section>
     <p id="status" hidden></p>
     <form id="composer">
       <div id="attach" hidden></div>
@@ -102,8 +115,8 @@
       </div>
     </form>
   </main>
-  <script src="/static/vendor/xterm.min.js?v=38"></script>
-  <script src="/static/vendor/addon-fit.min.js?v=38"></script>
-  <script src="/static/app.js?v=38"></script>
+  <script src="/static/vendor/xterm.min.js?v=42"></script>
+  <script src="/static/vendor/addon-fit.min.js?v=42"></script>
+  <script src="/static/app.js?v=42"></script>
 </body>
 </html>

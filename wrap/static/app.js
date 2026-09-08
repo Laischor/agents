@@ -32,6 +32,7 @@ const state = {
   diffOpen: false,
   attachments: [],
   pingSid: "",
+  settings: false,
   catalog: {},
   sessions: [],
   history: [],
@@ -726,15 +727,101 @@ function loadPrefsFor(agent) {
   }
 }
 
+function writePrefsFor(agent, prefs) {
+  if (!agent || agent === "console") return;
+  try {
+    localStorage.setItem(
+      prefsKey(agent),
+      JSON.stringify({
+        model: prefs.model || "",
+        effort: prefs.effort || "",
+        fast: Boolean(prefs.fast),
+      }),
+    );
+  } catch (_) {
+    /* ignore */
+  }
+  if (chatAgent() === agent && !(state.session && state.session.live)) applyCatalog();
+}
+
 function savePrefs() {
-  localStorage.setItem(
-    prefsKey(chatAgent()),
-    JSON.stringify({
-      model: $("model").value,
-      effort: $("effort").value,
-      fast: $("fast").checked,
-    }),
-  );
+  writePrefsFor(chatAgent(), {
+    model: $("model").value,
+    effort: $("effort").value,
+    fast: $("fast").checked,
+  });
+}
+
+function catalogAgents() {
+  const agents = state.catalog.agents || [
+    { id: "claude", label: "Claude" },
+    { id: "cursor", label: "Cursor" },
+    { id: "opencode", label: "OpenCode" },
+  ];
+  return agents.filter((a) => a.id && a.id !== "console");
+}
+
+function fillSettings() {
+  const root = $("settings-agents");
+  if (!root) return;
+  root.innerHTML = "";
+  for (const a of catalogAgents()) {
+    const cat = state.catalog[a.id] || { models: [], effort: [], fast: false };
+    const prefs = loadPrefsFor(a.id);
+    const card = document.createElement("article");
+    card.className = "settings-agent";
+    const title = document.createElement("h3");
+    title.textContent = a.label || AGENT_LABEL[a.id] || a.id;
+    card.appendChild(title);
+
+    const modelLab = document.createElement("label");
+    modelLab.append("Model");
+    const modelSel = document.createElement("select");
+    fillSelect(modelSel, sortModels(cat.models), prefs.model || "");
+    modelSel.addEventListener("change", () => {
+      writePrefsFor(a.id, { ...loadPrefsFor(a.id), model: modelSel.value });
+    });
+    modelLab.appendChild(modelSel);
+    card.appendChild(modelLab);
+
+    const effortLab = document.createElement("label");
+    effortLab.append("Effort");
+    const effortSel = document.createElement("select");
+    fillSelect(effortSel, cat.effort, prefs.effort || "");
+    effortSel.addEventListener("change", () => {
+      writePrefsFor(a.id, { ...loadPrefsFor(a.id), effort: effortSel.value });
+    });
+    effortLab.appendChild(effortSel);
+    card.appendChild(effortLab);
+
+    if (cat.fast) {
+      const fastLab = document.createElement("label");
+      fastLab.className = "check";
+      const fast = document.createElement("input");
+      fast.type = "checkbox";
+      fast.checked = Boolean(prefs.fast);
+      fast.addEventListener("change", () => {
+        writePrefsFor(a.id, { ...loadPrefsFor(a.id), fast: fast.checked });
+      });
+      fastLab.appendChild(fast);
+      fastLab.append(" Fast");
+      card.appendChild(fastLab);
+    }
+    root.appendChild(card);
+  }
+}
+
+function openSettings() {
+  state.settings = true;
+  fillSettings();
+  applyChrome();
+  closeMenu();
+}
+
+function closeSettings() {
+  if (!state.settings) return;
+  state.settings = false;
+  applyChrome();
 }
 
 function fillSelect(el, items, current) {
@@ -851,9 +938,13 @@ function applyCatalog() {
   syncFilterBtn();
   const cat = state.catalog[chatAgent()] || { models: [], effort: [], fast: false };
   const prefs = loadPrefsFor(chatAgent());
-  const model = state.session ? state.session.model || "" : prefs.model || "";
-  const effort = state.session ? state.session.effort || "" : prefs.effort || "";
-  const fast = state.session ? Boolean(state.session.fast) : Boolean(prefs.fast);
+  const sess = state.session;
+  // Closed history peeks have empty model/effort — keep wrap prefs (e.g. Grok 4.6)
+  // instead of falling through to Cursor CLI "auto".
+  const live = Boolean(sess && sess.live);
+  const model = (live ? sess.model : "") || prefs.model || "";
+  const effort = (live ? sess.effort : "") || prefs.effort || "";
+  const fast = live ? Boolean(sess.fast) : Boolean(prefs.fast);
   fillSelect($("model"), sortModels(cat.models), model);
   fillSelect($("effort"), cat.effort, effort);
   $("fast-wrap").hidden = !cat.fast;
@@ -910,7 +1001,13 @@ function fillProjects() {
 }
 
 function setHash() {
-  const next = state.session ? state.session.id : state.draft ? "new" : "";
+  const next = state.settings
+    ? "settings"
+    : state.session
+      ? state.session.id
+      : state.draft
+        ? "new"
+        : "";
   const cur = (location.hash || "#").slice(1);
   if (cur !== next) history.replaceState(null, "", next ? `#${next}` : location.pathname);
 }
@@ -991,10 +1088,26 @@ function applyChrome() {
     $("tui").hidden = true;
   }
   const title = $("mobile-title");
-  if (sess) title.textContent = sessionLabel(sess);
+  if (state.settings) title.textContent = "Settings";
+  else if (sess) title.textContent = sessionLabel(sess);
   else if (draft) title.textContent = "New session";
   else title.textContent = "wrap";
   $("btn-menu").classList.toggle("ping", Boolean(state.pingSid));
+  const settings = Boolean(state.settings);
+  $("settings").hidden = !settings;
+  $("btn-settings").classList.toggle("on", settings);
+  $("btn-settings").setAttribute("aria-pressed", settings ? "true" : "false");
+  if (settings) {
+    $("session-bar").hidden = true;
+    $("chat").hidden = true;
+    $("console").hidden = true;
+    $("composer").hidden = true;
+    $("status").hidden = true;
+    $("tui").hidden = true;
+    $("diff").hidden = true;
+  } else if ($("status").textContent) {
+    $("status").hidden = false;
+  }
   setHash();
 }
 
@@ -1003,6 +1116,7 @@ function openDraft() {
     state.es.close();
     state.es = null;
   }
+  state.settings = false;
   state.session = null;
   state.draft = true;
   state.paneOpen = false;
@@ -1024,6 +1138,7 @@ function clearMain() {
     state.es.close();
     state.es = null;
   }
+  state.settings = false;
   state.session = null;
   state.draft = false;
   state.paneOpen = false;
@@ -1330,6 +1445,7 @@ async function loadCatalog() {
   try {
     state.catalog = await api("/api/catalog");
     applyCatalog();
+    if (state.settings) fillSettings();
   } catch (err) {
     $("health").textContent = String(err.message || err);
   }
@@ -1372,6 +1488,7 @@ function setProject(cwd) {
 }
 
 function renderSession(sess) {
+  state.settings = false;
   state.session = sess;
   state.draft = false;
   if (sess.agent && sess.agent !== "console") state.agent = sess.agent;
@@ -1663,6 +1780,9 @@ async function spawnSession(cfg) {
         model: cfg.model || "",
         effort: cfg.effort || "",
         fast: Boolean(cfg.fast),
+        resume: cfg.resume || "",
+        title: cfg.title || "",
+        text: cfg.text || "",
       }),
     });
     renderSession(sess);
@@ -1678,7 +1798,7 @@ async function spawnSession(cfg) {
   }
 }
 
-async function startSession() {
+async function startSession(text) {
   if (!state.cwd) {
     setStatus("Pick a project first");
     return null;
@@ -1689,6 +1809,7 @@ async function startSession() {
     model: $("model").value,
     effort: $("effort").value,
     fast: $("fast").checked,
+    text: text || "",
   });
 }
 
@@ -1779,7 +1900,7 @@ async function peekHistory(item) {
   }
 }
 
-async function wakeClosed(peek) {
+async function wakeClosed(peek, text) {
   if (!peek?.native_id && !peek?.cli_session && !peek?.oc_id && !peek?.hm_id) return null;
   savePrefs();
   setStatus("");
@@ -1791,10 +1912,11 @@ async function wakeClosed(peek) {
         agent: peek.agent,
         cwd: peek.cwd,
         resume: peek.native_id || peek.cli_session || peek.oc_id || peek.hm_id,
-        model: $("model").value,
-        effort: $("effort").value,
+        model: $("model").value || loadPrefsFor(peek.agent).model || "",
+        effort: $("effort").value || loadPrefsFor(peek.agent).effort || "",
         fast: $("fast").checked,
         title: peek.title || "",
+        text: peek.agent === "cursor" ? text || "" : "",
       }),
     });
     const oldId = peek.id;
@@ -1971,12 +2093,16 @@ async function sendMessage(ev) {
   state.sending = true;
   $("btn-send").disabled = true;
   try {
+    let viaArgv = false;
     if (!state.session) {
-      const sess = await startSession();
+      const sess = await startSession(state.agent === "cursor" ? text : "");
       if (!sess) return;
+      viaArgv = state.agent === "cursor" && Boolean(text);
     } else if (!state.session.live) {
-      const sess = await wakeClosed(state.session);
+      const agent = state.session.agent;
+      const sess = await wakeClosed(state.session, agent === "cursor" ? text : "");
       if (!sess) return;
+      viaArgv = agent === "cursor" && Boolean(text);
     }
     $("input").value = "";
     fitInput();
@@ -2220,6 +2346,14 @@ async function onImages(files) {
 
 function onHash() {
   const id = (location.hash || "#").slice(1);
+  if (id === "settings") {
+    if (!state.settings) openSettings();
+    return;
+  }
+  if (state.settings) {
+    state.settings = false;
+    applyChrome();
+  }
   if (id === "new") {
     if (!state.draft) openDraft();
     return;
@@ -2261,6 +2395,11 @@ $("model").addEventListener("change", savePrefs);
 $("effort").addEventListener("change", savePrefs);
 $("fast").addEventListener("change", savePrefs);
 $("btn-new").addEventListener("click", openDraft);
+$("btn-settings").addEventListener("click", () => {
+  if (state.settings) closeSettings();
+  else openSettings();
+});
+$("btn-settings-close").addEventListener("click", closeSettings);
 $("search").addEventListener("input", onSearchInput);
 $("search").addEventListener("keydown", (e) => {
   if (e.key === "Escape" && $("search").value) {
