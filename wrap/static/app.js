@@ -529,8 +529,6 @@ function showConsoleTerm(sess) {
     return;
   }
   ensureShTerm();
-  const meta = $("console-meta");
-  if (meta) meta.textContent = projectName(sess?.cwd || "") || "";
   if (sess?.screen) paintScreen(shX, sess.screen);
   requestAnimationFrame(() => fitResize("sh"));
   shX?.term?.focus();
@@ -572,7 +570,21 @@ function renderGitDiff() {
   if (data.ahead) bits.push(`↑${data.ahead}`);
   if (data.behind) bits.push(`↓${data.behind}`);
   if (data.stat) bits.push(data.stat);
-  else if (!(data.files || []).length) bits.push("clean");
+  const nested = data.nested || [];
+  if (nested.length) {
+    if (nested.length <= 8) {
+      for (const n of nested) {
+        let s = n.path;
+        if (n.ahead) s += ` ↑${n.ahead}`;
+        if (n.behind) s += ` ↓${n.behind}`;
+        bits.push(s);
+      }
+    } else {
+      bits.push(`${nested.length} nested`);
+    }
+  } else if (!(data.files || []).length) {
+    bits.push("clean");
+  }
   meta.textContent = bits.join(" · ");
   const files = data.files || [];
   if (!files.length) {
@@ -627,12 +639,14 @@ async function loadDiff() {
   try {
     state.diff = await api("/api/git?cwd=" + encodeURIComponent(cwd));
     const n = (state.diff?.ok && state.diff.files) ? state.diff.files.length : 0;
+    const nestedN = (state.diff?.ok && state.diff.nested) ? state.diff.nested.length : 0;
+    const dirty = n > 0 || nestedN > 0;
     if (btn) {
-      btn.hidden = n === 0 || state.diffOpen;
+      btn.hidden = !dirty || state.diffOpen || state.paneOpen;
       btn.textContent = n > 1 ? `Diff · ${n}` : "Diff";
     }
     if (state.diffOpen) renderGitDiff();
-    if (n === 0 && state.diffOpen) setDiffOpen(false);
+    if (!dirty && state.diffOpen) setDiffOpen(false);
   } catch (err) {
     state.diff = { ok: false, error: err.message || String(err) };
     if (btn) btn.hidden = true;
@@ -964,7 +978,7 @@ function applyChrome() {
   $("diff").hidden = !state.diffOpen || isConsole(sess);
   $("composer").hidden = isConsole(sess);
   const nDiff = (state.diff?.ok && state.diff.files) ? state.diff.files.length : 0;
-  $("btn-diff").hidden = isConsole(sess) || state.diffOpen || nDiff === 0;
+  $("btn-diff").hidden = isConsole(sess) || state.diffOpen || state.paneOpen || nDiff === 0;
   if (viewing) {
     if (sess.agent && sess.agent !== "console") $("agent").value = sess.agent;
     fillProjects();
@@ -1072,7 +1086,22 @@ function sessionRow(s, onClick, onRemove) {
   btn.addEventListener("click", onClick);
   li.appendChild(btn);
   const native = s.native_id || s.cli_session || s.oc_id || s.hm_id;
-  if (native && s.agent) {
+  if (s.agent === "console" && s.live && s.id) {
+    li.classList.add("has-actions");
+    const stop = document.createElement("button");
+    stop.type = "button";
+    stop.className = "sess-stop";
+    stop.setAttribute("aria-label", "Stop console");
+    stop.title = "Stop console";
+    stop.innerHTML =
+      '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1.5" fill="currentColor"/></svg>';
+    stop.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      stopSession(s);
+    });
+    li.appendChild(stop);
+  } else if (native && s.agent) {
     li.classList.add("has-actions");
     const pin = document.createElement("button");
     pin.type = "button";
@@ -1996,12 +2025,8 @@ async function keys(list) {
 function setPaneOpen(on) {
   state.paneOpen = Boolean(on) && Boolean(state.session?.tmux) && !isConsole();
   if (state.paneOpen) state.diffOpen = false;
-  $("tui").hidden = !state.paneOpen;
-  $("btn-pane").classList.toggle("on", state.paneOpen);
-  $("input").disabled = !canCompose() || state.paneOpen || state.diffOpen;
-  $("btn-send").disabled = !canCompose() || state.paneOpen || state.diffOpen;
+  applyChrome();
   if (state.paneOpen) {
-    ensureTuiTerm();
     if (state.session?.screen) paintScreen(tuiX, state.session.screen);
     requestAnimationFrame(() => {
       fitResize("tui");
@@ -2289,28 +2314,29 @@ $("btn-int").addEventListener("click", async () => {
 $("btn-clear").addEventListener("click", () => {
   clearSession();
 });
-async function stopCurrentSession() {
-  if (!state.session) return;
-  const stopMsg = isConsole()
+async function stopSession(sess) {
+  if (!sess?.id) return;
+  const stopMsg = isConsole(sess)
     ? "Stop this console? The shell exits and it disappears from the list."
-    : state.session.agent === "opencode"
+    : sess.agent === "opencode"
       ? "Close this OpenCode session in wrap? It stays in OpenCode history."
-      : state.session.agent === "hermes"
+      : sess.agent === "hermes"
         ? "Close this Hermes session in wrap? It stays in Hermes history."
         : "Stop this session? The CLI process exits. Other sessions stay up.";
   if (!confirm(stopMsg)) return;
   try {
-    await api(`/api/sessions/${state.session.id}`, { method: "DELETE" });
-    clearMain();
+    await api(`/api/sessions/${sess.id}`, { method: "DELETE" });
+    if (state.session?.id === sess.id) clearMain();
     loadSessions();
   } catch (err) {
     setStatus(err.message || String(err));
   }
 }
+function stopCurrentSession() {
+  return stopSession(state.session);
+}
 $("btn-stop").addEventListener("click", () => stopCurrentSession());
-$("btn-console-stop").addEventListener("click", () => stopCurrentSession());
 $("btn-pane").addEventListener("click", () => setPaneOpen(!state.paneOpen));
-$("btn-tui-close").addEventListener("click", () => setPaneOpen(false));
 $("tui").addEventListener("click", (e) => {
   if (e.target.closest("button")) return;
   if (state.paneOpen) tuiX?.term?.focus();

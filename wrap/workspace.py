@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +14,33 @@ GIT_DIFF_MAX_FILES = 80
 GIT_DIFF_MAX_BYTES = 120_000
 GIT_FILE_MAX_BYTES = 80_000
 GIT_TIMEOUT = 8.0
+NESTED_GIT_MAX = 32
+NESTED_WALK_MAX = 4000
+NESTED_GIT_TIMEOUT = 4.0
+NESTED_SKIP_DIRS = frozenset({
+    ".git",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".wrap-pastes",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    "volumes",
+    "tmp",
+    "temp",
+    "cache",
+    ".cache",
+    "coverage",
+    "logs",
+    "pgdata",
+})
+NESTED_MAX_DEPTH = 4
+NESTED_WALK_BUDGET_S = 1.0
 
 AHEAD_RE = re.compile(r"ahead (\d+)")
 BEHIND_RE = re.compile(r"behind (\d+)")
@@ -70,7 +100,9 @@ def _status_letter(xy: str) -> str:
     return (y if y not in " " else x).strip() or "M"
 
 
-def _file_diff(root: Path, rel: str, untracked: bool) -> tuple[str, bool, bool]:
+def _file_diff(
+    root: Path, rel: str, untracked: bool, against: str = "HEAD"
+) -> tuple[str, bool, bool]:
     path = root / rel
     if untracked:
         try:
@@ -90,7 +122,7 @@ def _file_diff(root: Path, rel: str, untracked: bool) -> tuple[str, bool, bool]:
             text = text[:GIT_DIFF_MAX_BYTES]
         return text, False, truncated
     try:
-        r = _git(root, "diff", "HEAD", "--", rel)
+        r = _git(root, "diff", against, "--", rel)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return "", False, True
     if b"\0" in r.stdout[:8192]:
@@ -102,23 +134,101 @@ def _file_diff(root: Path, rel: str, untracked: bool) -> tuple[str, bool, bool]:
     return text, False, truncated
 
 
-def git_view(cwd: Path, host_root: Path) -> dict[str, Any]:
+def _name_status_against(root: Path, against: str, timeout: float) -> list[dict[str, Any]]:
     try:
-        root = git_toplevel(cwd)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-        return {"ok": False, "error": str(exc), "cwd": str(cwd)}
-    if root is None:
-        return {"ok": False, "error": "not a git repository", "cwd": str(cwd)}
-    host = host_root.resolve()
-    if root != host and host not in root.parents:
-        return {"ok": False, "error": "repo outside HOST_PROJECTS", "cwd": str(cwd)}
+        r = _git(
+            root,
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--name-status",
+            against,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    if r.returncode != 0:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in _decode(r.stdout).splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        letter = (parts[0][:1] or "M").upper()
+        path = parts[-1].strip()
+        if not path:
+            continue
+        out.append(
+            {
+                "path": path,
+                "xy": f" {letter}",
+                "status": letter if letter in "MADRU" else "M",
+                "untracked": False,
+            }
+        )
+    return out
+
+
+def _find_nested_repos(root: Path) -> tuple[list[Path], bool]:
+    """Working trees under root with their own .git (nested clones / submodules)."""
+    found: list[Path] = []
+    queued = deque([(root, 0)])
+    walked = 0
+    truncated = False
+    deadline = time.monotonic() + NESTED_WALK_BUDGET_S
+    while queued:
+        if len(found) >= NESTED_GIT_MAX:
+            truncated = True
+            break
+        if time.monotonic() > deadline:
+            truncated = True
+            break
+        current, depth = queued.popleft()
+        git = current / ".git"
+        if current != root and (git.is_dir() or git.is_file()):
+            found.append(current)
+            continue
+        if depth >= NESTED_MAX_DEPTH:
+            continue
+        walked += 1
+        if walked > NESTED_WALK_MAX:
+            truncated = True
+            break
+        try:
+            with os.scandir(current) as it:
+                kids = list(it)
+        except OSError:
+            continue
+        for entry in kids:
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            if entry.name in NESTED_SKIP_DIRS:
+                continue
+            queued.append((Path(entry.path), depth + 1))
+    found.sort(key=lambda p: str(p))
+    return found, truncated
+
+
+def _status_snapshot(root: Path, timeout: float = GIT_TIMEOUT) -> dict[str, Any]:
     try:
-        r = _git(root, "-c", "core.quotepath=false", "status", "-sb", "--porcelain=v1", "-uall")
+        r = _git(
+            root,
+            "-c",
+            "core.quotepath=false",
+            "status",
+            "-sb",
+            "--porcelain=v1",
+            "-uall",
+            timeout=timeout,
+        )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-        return {"ok": False, "error": str(exc), "cwd": str(cwd), "repo": str(root)}
+        return {"ok": False, "error": str(exc)}
     if r.returncode != 0:
         err = _decode(r.stderr).strip() or f"git status failed ({r.returncode})"
-        return {"ok": False, "error": err, "cwd": str(cwd), "repo": str(root)}
+        return {"ok": False, "error": err}
     lines = _decode(r.stdout).splitlines()
     branch = ""
     upstream = ""
@@ -148,18 +258,115 @@ def git_view(cwd: Path, host_root: Path) -> dict[str, Any]:
         rest = line[3:]
         if " -> " in rest:
             rest = rest.split(" -> ", 1)[1]
-        rel = rest
         files.append(
             {
-                "path": rel,
+                "path": rest,
                 "xy": xy,
                 "status": _status_letter(xy),
                 "untracked": xy == "??",
             }
         )
+    return {
+        "ok": True,
+        "branch": branch,
+        "upstream": upstream,
+        "ahead": ahead,
+        "behind": behind,
+        "files": files,
+        "status_lines": max(0, len(lines) - 1),
+    }
+
+
+def _attach_repo(files: list[dict[str, Any]], repo_root: Path, prefix: str) -> None:
+    for item in files:
+        inner = str(item["path"])
+        item["_root"] = repo_root
+        item["_rel"] = inner
+        item["repo"] = prefix
+        if prefix:
+            item["path"] = f"{prefix}/{inner}"
+
+
+def git_view(cwd: Path, host_root: Path) -> dict[str, Any]:
+    try:
+        root = git_toplevel(cwd)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        return {"ok": False, "error": str(exc), "cwd": str(cwd)}
+    if root is None:
+        return {"ok": False, "error": "not a git repository", "cwd": str(cwd)}
+    host = host_root.resolve()
+    if root != host and host not in root.parents:
+        return {"ok": False, "error": "repo outside HOST_PROJECTS", "cwd": str(cwd)}
+    snap = _status_snapshot(root)
+    if not snap.get("ok"):
+        return {
+            "ok": False,
+            "error": snap.get("error") or "git status failed",
+            "cwd": str(cwd),
+            "repo": str(root),
+        }
+    files: list[dict[str, Any]] = list(snap["files"])
+    _attach_repo(files, root, "")
+    nested_meta: list[dict[str, Any]] = []
+    nested_roots, nested_scan_truncated = _find_nested_repos(root)
+    for nroot in nested_roots:
+        try:
+            ntop = git_toplevel(nroot)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+        if ntop is None:
+            continue
+        if ntop != host and host not in ntop.parents:
+            continue
+        try:
+            prefix = nroot.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        nsnap = _status_snapshot(ntop, timeout=NESTED_GIT_TIMEOUT)
+        if not nsnap.get("ok"):
+            continue
+        nfiles = list(nsnap["files"])
+        against = (nsnap.get("upstream") or "").strip() or "HEAD"
+        seen = {str(item["path"]) for item in nfiles}
+        if against != "HEAD":
+            for extra in _name_status_against(ntop, against, NESTED_GIT_TIMEOUT):
+                if extra["path"] in seen:
+                    continue
+                nfiles.append(extra)
+                seen.add(extra["path"])
+        _attach_repo(nfiles, ntop, prefix)
+        if against != "HEAD":
+            for item in nfiles:
+                if not item.get("untracked"):
+                    item["_against"] = against
+        files.extend(nfiles)
+        if nfiles or nsnap["ahead"] or nsnap["behind"]:
+            nested_meta.append(
+                {
+                    "path": prefix,
+                    "branch": nsnap["branch"],
+                    "ahead": nsnap["ahead"],
+                    "behind": nsnap["behind"],
+                    "files": len(nfiles),
+                }
+            )
+    nested_dirs = {nroot.relative_to(root).as_posix() for nroot in nested_roots}
+    if nested_dirs:
+        files = [
+            item
+            for item in files
+            if str(item.get("path") or "") not in nested_dirs
+        ]
+    files.sort(key=lambda item: (1 if item.get("untracked") else 0, str(item.get("path") or "")))
+    truncated_list = len(files) > GIT_DIFF_MAX_FILES
     files = files[:GIT_DIFF_MAX_FILES]
     for item in files:
-        diff, binary, truncated = _file_diff(root, str(item["path"]), bool(item["untracked"]))
+        repo_root = item.pop("_root", root)
+        rel = str(item.pop("_rel", item["path"]))
+        against = str(item.pop("_against", "HEAD") or "HEAD")
+        diff, binary, truncated = _file_diff(
+            repo_root, rel, bool(item["untracked"]), against=against
+        )
         item["diff"] = diff
         item["binary"] = binary
         item["truncated"] = truncated
@@ -170,15 +377,20 @@ def git_view(cwd: Path, host_root: Path) -> dict[str, Any]:
             stat = _decode(sr.stdout).strip()
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         stat = ""
+    nested_file_n = sum(n["files"] for n in nested_meta)
+    if nested_file_n:
+        extra = f"{nested_file_n} nested"
+        stat = f"{stat} · {extra}" if stat else extra
     return {
         "ok": True,
         "cwd": str(cwd),
         "repo": str(root),
-        "branch": branch,
-        "upstream": upstream,
-        "ahead": ahead,
-        "behind": behind,
+        "branch": snap["branch"],
+        "upstream": snap["upstream"],
+        "ahead": snap["ahead"],
+        "behind": snap["behind"],
         "stat": stat,
         "files": files,
-        "truncated_list": len(lines) - 1 > GIT_DIFF_MAX_FILES if lines else False,
+        "nested": nested_meta,
+        "truncated_list": truncated_list or nested_scan_truncated,
     }
