@@ -26,6 +26,7 @@ ensure_gh_passthrough() {
   # File must exist before Compose bind-mounts it (else Docker creates a dir).
   : >"$gitconfig_file"
   git config -f "$gitconfig_file" credential.helper '!gh auth git-credential'
+  git config -f "$gitconfig_file" --replace-all safe.directory '*'
   if [[ -n "$name" ]]; then
     git config -f "$gitconfig_file" user.name "$name"
   fi
@@ -70,6 +71,32 @@ PY
     _upsert_dotenv_key "$AGENTS_DIR/data/hermes/.env" GH_TOKEN "$GH_TOKEN"
     _upsert_dotenv_key "$AGENTS_DIR/data/hermes/.env" GITHUB_TOKEN "$GITHUB_TOKEN"
   fi
+}
+
+# Upstream nousresearch/hermes-agent has git+ssh but no gh CLI. Copy the Linux
+# binary from agents:local into the Hermes data volume (on PATH as
+# /opt/data/.local/bin). Safe to run from the host — do not copy Darwin gh.
+ensure_hermes_gh_cli() {
+  if command -v hermes_enabled >/dev/null 2>&1; then
+    hermes_enabled || return 0
+  fi
+  local dest="$AGENTS_DIR/data/hermes/.local/bin/gh"
+  mkdir -p "$(dirname "$dest")"
+  if [[ -x "$dest" ]]; then
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    return 0
+  fi
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx agents; then
+    docker cp agents:/usr/bin/gh "$dest" >/dev/null 2>&1 || true
+  elif docker image inspect agents:local >/dev/null 2>&1; then
+    local cid=""
+    cid="$(docker create agents:local)" || return 0
+    docker cp "$cid:/usr/bin/gh" "$dest" >/dev/null 2>&1 || true
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+  fi
+  chmod +x "$dest" 2>/dev/null || true
 }
 
 _upsert_dotenv_key() {

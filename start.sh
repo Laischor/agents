@@ -167,10 +167,33 @@ ensure_data_dirs() {
     "$AGENTS_DIR/data/cmux/sessions" \
     "$AGENTS_DIR/data/wrap"
   if hermes_enabled; then
-    mkdir -p "$AGENTS_DIR/data/hermes"
+    mkdir -p "$AGENTS_DIR/data/hermes/home/.config" \
+      "$AGENTS_DIR/data/hermes/.local/bin"
   fi
   mkdir -p "$AGENTS_DIR/data/gh"
   [[ -f "$AGENTS_DIR/data/gitconfig" ]] || : >"$AGENTS_DIR/data/gitconfig"
+}
+
+# Host $HOME for SSH bind-mounts. Persist so compose interpolation works
+# even if start.sh is later invoked from inside the agents container.
+ensure_host_home() {
+  load_env
+  if [[ -n "${HOST_HOME:-}" ]]; then
+    export HOST_HOME
+    return 0
+  fi
+  local home="${HOME:-}"
+  if [[ -z "$home" || "$home" == "/root" ]]; then
+    return 0
+  fi
+  HOST_HOME="$home"
+  {
+    printf '\n'
+    printf '# Host home (SSH bind-mount). Auto-set by start.sh\n'
+    printf 'HOST_HOME=%s\n' "$HOST_HOME"
+  } >> "$AGENTS_DIR/.env"
+  export HOST_HOME
+  log "HOST_HOME in .env geschrieben ($HOST_HOME)."
 }
 
 # macOS Keychain holds the gh OAuth token; ~/.config/gh has no oauth_token.
@@ -309,6 +332,7 @@ start_agents() {
   ensure_agents_dir_env
   load_env
   ensure_data_dirs
+  ensure_host_home
   ensure_gh_token
   ensure_hermes_dashboard_auth
   ensure_hermes_uid
@@ -318,6 +342,7 @@ start_agents() {
   # Re-apply after load_env in case .env left GH_TOKEN empty
   ensure_gh_token
   ensure_gh_passthrough
+  ensure_hermes_gh_cli
 
   if docker compose version >/dev/null 2>&1; then
     COMPOSE=(docker compose -f "$COMPOSE_FILE")
@@ -343,6 +368,8 @@ start_agents() {
   log "${start_msg}…"
   compose_profile_args
   "${COMPOSE[@]}" "${COMPOSE_PROFILES[@]}" up -d --build
+  # agents:local exists after this; copy gh into the Hermes volume if needed.
+  ensure_hermes_gh_cli
 
   log "Fertig. Beispiele: dagent | dpi | dclaude | dopencode | dwrap | agents-shell"
   print_wrap_url

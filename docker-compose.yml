@@ -35,8 +35,10 @@ services:
       SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
       # macOS: gh stores OAuth in Keychain — start.sh/run.sh inject via `gh auth token`.
       # Hermes Skills Hub / github-auth read GITHUB_TOKEN (GH_TOKEN is the gh CLI name).
+      # Local-terminal subprocesses strip GH_TOKEN (Tier-1); git/gh then use the
+      # bind-mounted hosts.yml under HOME (see volumes).
       GH_TOKEN: ${GH_TOKEN:-}
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-${GH_TOKEN:-}}
       HOST_PROJECTS: ${HOST_PROJECTS}
       # Image default is /opt/data only — also allow write_file/patch under mounted projects
       HERMES_WRITE_SAFE_ROOT: /opt/data:/tmp:${HOST_PROJECTS}
@@ -53,9 +55,16 @@ services:
       # Terminal stays local; this is not the old agents:local sandbox backend.
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       # Linux gh config with oauth_token (host ~/.config/gh has none — Keychain).
-      # Not under home/: stage2 recursively chowns that tree.
+      # Dual mount: hermes passwd HOME is /opt/data; local-terminal subprocesses
+      # rewrite HOME to /opt/data/home (home_mode: auto). :ro so stage2's
+      # recursive chown of home/ cannot touch host files.
       - ./data/gh:/opt/data/.config/gh:ro
       - ./data/gitconfig:/opt/data/.gitconfig:ro
+      - ./data/gh:/opt/data/home/.config/gh:ro
+      - ./data/gitconfig:/opt/data/home/.gitconfig:ro
+      # Host GitHub SSH — same keys as the agents container.
+      - ${HOST_HOME:-${HOME}}/.ssh:/opt/data/.ssh:ro
+      - ${HOST_HOME:-${HOME}}/.ssh:/opt/data/home/.ssh:ro
 
   # Firecrawl-shaped scrape/search API for Hermes web_search / web_extract.
   # One container — official Firecrawl OSS needs Redis+RabbitMQ+Postgres+Playwright.

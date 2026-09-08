@@ -85,14 +85,17 @@ ensure_services() {
     "$AGENTS_DIR/data/wrap"
   local compose_args=()
   if hermes_enabled; then
-    mkdir -p "$AGENTS_DIR/data/hermes"
+    mkdir -p "$AGENTS_DIR/data/hermes/home/.config" \
+      "$AGENTS_DIR/data/hermes/.local/bin"
     ensure_gh_passthrough
+    ensure_hermes_gh_cli
     compose_args+=(--profile hermes)
   fi
   if firecrawl_enabled || hermes_enabled; then
     compose_args+=(--profile firecrawl)
   fi
   "${COMPOSE[@]}" "${compose_args[@]}" up -d --quiet-pull
+  ensure_hermes_gh_cli
 }
 
 # Host-side: mirror macOS clipboard PNGs into data/clipboard for container stubs.
@@ -208,10 +211,19 @@ fi
 
 # Hermes one-time setup wizard (does not require HERMES=1 / running gateway)
 if [[ "$cmd" == "hermes-setup" ]]; then
-  mkdir -p "$AGENTS_DIR/data/hermes"
+  mkdir -p "$AGENTS_DIR/data/hermes/home/.config" \
+    "$AGENTS_DIR/data/hermes/.local/bin"
+  ensure_hermes_gh_cli
+  host_home="${HOST_HOME:-$HOME}"
   exec docker run -it --rm \
     -v "$AGENTS_DIR/data/hermes:/opt/data" \
     -v "${HOST_PROJECTS}:${HOST_PROJECTS}" \
+    -v "$AGENTS_DIR/data/gh:/opt/data/.config/gh:ro" \
+    -v "$AGENTS_DIR/data/gitconfig:/opt/data/.gitconfig:ro" \
+    -v "$AGENTS_DIR/data/gh:/opt/data/home/.config/gh:ro" \
+    -v "$AGENTS_DIR/data/gitconfig:/opt/data/home/.gitconfig:ro" \
+    -v "${host_home}/.ssh:/opt/data/.ssh:ro" \
+    -v "${host_home}/.ssh:/opt/data/home/.ssh:ro" \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
     -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
     -e GOOGLE_API_KEY="${GOOGLE_API_KEY:-}" \

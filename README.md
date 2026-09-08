@@ -101,7 +101,7 @@ Set `AGENTS_WRAP_SERVE=0` in `.env` to skip auto-start. Recreate `agents` from t
 
 On macOS, `gh auth login` stores the OAuth token in the **Keychain**, not in `~/.config/gh/hosts.yml`. Mounting that directory into Linux is not enough.
 
-`./start.sh` and `run.sh` call `gh auth token` on the host and write a Linux gh config (with `oauth_token`) plus a git credential helper into `data/gh/` and `data/gitconfig` (gitignored). Those files are mounted **read-only** into `agents` and the Hermes gateway (`/opt/data/.config/gh`, `/opt/data/.gitconfig`). `config.yml` includes `version: "1"` so `gh` ≥2.40 does not try to migrate (and fatal) on the `:ro` mount. They also set `GH_TOKEN` / `GITHUB_TOKEN` on the containers and in `data/hermes/.env`. Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
+`./start.sh` and `run.sh` call `gh auth token` on the host and write a Linux gh config (with `oauth_token`) plus a git credential helper into `data/gh/` and `data/gitconfig` (gitignored). Those files are mounted **read-only** into `agents` (`/root/.config/gh`) and the Hermes gateway at both `/opt/data/.config/gh` (passwd home) and `/opt/data/home/.config/gh` (local-terminal subprocess HOME). `config.yml` includes `version: "1"` so `gh` ≥2.40 does not try to migrate (and fatal) on the `:ro` mount. They also set `GH_TOKEN` / `GITHUB_TOKEN` on the containers and in `data/hermes/.env`. The upstream Hermes image has no `gh` binary — `start.sh` copies it from `agents:local` into `data/hermes/.local/bin` (on PATH). Host `~/.ssh` is bind-mounted into Hermes at `/opt/data/.ssh` and `/opt/data/home/.ssh` so `git`/`ssh` can push and clone. Prerequisites: `gh` installed and logged in on the host. Override anytime with `GH_TOKEN=` in `.env`.
 
 Git in the container uses `/etc/gitconfig` for `safe.directory *` and `credential.helper = !gh auth git-credential`. Host `~/.gitconfig` is mounted at `/etc/gitconfig.host` (read-only) so only `user.name` / `user.email` are copied into the container — not macOS credential helpers that clear the chain or point at `/opt/homebrew/bin/gh`. On the host you can use the same pathless helper: `helper = !gh auth git-credential`.
 
@@ -238,7 +238,7 @@ Search is built into Molx. Optional LLM extract uses `OPENAI_API_KEY` + `FIRECRA
 
 ### Terminal (local)
 
-Hermes uses `terminal.backend: local` (`TERMINAL_ENV=local`). Shell, file, and `execute_code` tools run **inside the `hermes` container** — not in `agents:local`, and without Cursor CLI / Claude Code on `PATH`. Coding agents stay in the separate `agents` service (`dagent` / `dclaude` / …).
+Hermes uses `terminal.backend: local` (`TERMINAL_ENV=local`). Shell, file, and `execute_code` tools run **inside the `hermes` container** — not in `agents:local`, and without Cursor CLI / Claude Code on `PATH`. Coding agents stay in the separate `agents` service (`dagent` / `dclaude` / …). GitHub clone/push uses the same host `gh` token and `~/.ssh` as `agents` (subprocess `HOME` is `/opt/data/home`).
 
 `HOST_PROJECTS` is bind-mounted so `write_file` / `patch` can touch the project tree (`HERMES_WRITE_SAFE_ROOT=/opt/data:/tmp:${HOST_PROJECTS}`). The gateway also mounts `${DOCKER_SOCK:-/var/run/docker.sock}` so you can restart `agents` (or other compose services) from the dashboard when wrap is unresponsive — the terminal backend stays `local`, not the old `agents:local` sandbox.
 
@@ -249,9 +249,9 @@ Configs/auth live on the host under `./data/` and survive rebuilds:
 | Host              | Container            |
 |-------------------|----------------------|
 | `~/.gitconfig`         | `/etc/gitconfig.host` (read-only; identity only) |
-| `~/.ssh/`              | `/root/.ssh` (read-only, GitHub SSH) |
-| `data/gitconfig`       | Hermes gateway: `/opt/data/.gitconfig` (identity + `gh auth git-credential`) |
-| `data/gh/`             | `agents`: `/root/.config/gh`; Hermes gateway: `/opt/data/.config/gh` (Linux hosts.yml with token) |
+| `~/.ssh/`              | `agents`: `/root/.ssh`; Hermes: `/opt/data/.ssh` and `/opt/data/home/.ssh` (read-only, GitHub SSH) |
+| `data/gitconfig`       | Hermes: `/opt/data/.gitconfig` and `/opt/data/home/.gitconfig` (identity + `gh auth git-credential`) |
+| `data/gh/`             | `agents`: `/root/.config/gh`; Hermes: `/opt/data/.config/gh` and `/opt/data/home/.config/gh` (Linux hosts.yml with token) |
 | `data/cursor/`         | `/root/.cursor`         |
 | `data/cursor-config/`  | `/root/.config/cursor` (login tokens) |
 | `data/pi/`             | `/root/.pi`             |
