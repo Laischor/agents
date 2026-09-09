@@ -397,6 +397,21 @@ function persistCwd(cwd) {
   }
 }
 
+function isMac() {
+  return /Mac|iPhone|iPad/.test(navigator.platform || "");
+}
+
+function modSym() {
+  return isMac() ? "⌘" : "Ctrl";
+}
+
+function isTextField(el) {
+  if (!el || el === document.body) return false;
+  const tag = (el.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  return Boolean(el.isContentEditable);
+}
+
 function makeTerm(el, kind) {
   const term = new Terminal({
     cursorBlink: true,
@@ -812,6 +827,7 @@ function fillSettings() {
 }
 
 function openSettings() {
+  closeSpotlight();
   state.settings = true;
   fillSettings();
   applyChrome();
@@ -1059,10 +1075,15 @@ function applyChrome() {
   $("btn-send").disabled = !canCompose() || state.paneOpen || state.diffOpen;
   $("input").disabled = !canCompose() || state.paneOpen || state.diffOpen;
   $("btn-int").hidden = !running || isConsole(sess);
+  $("btn-int").title = `Interrupt (${modSym()}+.)`;
   $("btn-clear").hidden = !(viewing && sess?.cwd && sess?.agent && sess.agent !== "console");
   $("btn-stop").hidden = !running || isConsole(sess);
   $("btn-pane").hidden = !(running && sess?.tmux) || isConsole(sess);
+  $("btn-pane").title = `TUI (${modSym()}+U)`;
   $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && running && !isConsole(sess) && !state.diffOpen));
+  $("btn-diff").title = `Diff (${modSym()}+J)`;
+  $("search").title = `Filter sidebar. ${modSym()}K opens Spotlight.`;
+  $("btn-new").title = "New session";
   const showTui = running && sess?.tmux && state.paneOpen && !isConsole(sess) && !state.diffOpen;
   if (showTui) {
     $("tui").hidden = false;
@@ -1111,7 +1132,7 @@ function applyChrome() {
   setHash();
 }
 
-function openDraft() {
+function openDraft(opts = {}) {
   if (state.es) {
     state.es.close();
     state.es = null;
@@ -1121,7 +1142,9 @@ function openDraft() {
   state.draft = true;
   state.paneOpen = false;
   state.diffOpen = false;
-  if (state.agent === "console") state.agent = "claude";
+  if (opts.agent && opts.agent !== "console") state.agent = opts.agent;
+  else if (state.agent === "console") state.agent = "claude";
+  if (opts.cwd) persistCwd(opts.cwd);
   applyCatalog();
   clearAttachments();
   $("log").innerHTML = `<div class="empty">Pick a project and agent, then send a message</div>`;
@@ -1129,8 +1152,9 @@ function openDraft() {
   applyChrome();
   renderSessions();
   watchDiff();
-  $("project").focus();
   closeMenu();
+  if (opts.cwd && state.agent) $("input").focus();
+  else $("project").focus();
 }
 
 function clearMain() {
@@ -1264,6 +1288,11 @@ function matchesQuery(s, q) {
 
 function nativePair(s) {
   return `${s.agent || ""}:${s.native_id || s.cli_session || s.oc_id || s.hm_id || ""}`;
+}
+
+function liveSessions() {
+  const live = (state.sessions || []).filter((s) => s.live);
+  return [...live.filter((s) => s.pinned), ...live.filter((s) => !s.pinned)];
 }
 
 function renderSessions() {
@@ -2161,6 +2190,256 @@ function setPaneOpen(on) {
   }
 }
 
+function toggleTui() {
+  if (!state.session?.live || !state.session?.tmux || isConsole() || state.settings) return;
+  setPaneOpen(!state.paneOpen);
+}
+
+function toggleDiff() {
+  if (isConsole() || state.settings || !activeCwd()) return;
+  setDiffOpen(!state.diffOpen);
+}
+
+async function interruptSession() {
+  if (!state.session?.live || isConsole()) return;
+  try {
+    await api(`/api/sessions/${state.session.id}/interrupt`, { method: "POST", body: "{}" });
+  } catch (err) {
+    setStatus(err.message || String(err));
+  }
+}
+
+function cycleLiveSession(dir) {
+  const list = liveSessions();
+  if (!list.length) return;
+  const cur = state.session?.live ? state.session.id : "";
+  let i = list.findIndex((s) => s.id === cur);
+  if (i < 0) i = dir > 0 ? -1 : 0;
+  const next = list[(i + dir + list.length) % list.length];
+  if (next?.id && next.id !== cur) attachSession(next.id);
+}
+
+const cmdk = {
+  open: false,
+  q: "",
+  i: 0,
+  items: [],
+  pick: null,
+};
+
+function cmdkHay(parts) {
+  return parts.filter(Boolean).join(" ").toLowerCase();
+}
+
+function cmdkHit(hay, q) {
+  if (!q) return true;
+  return hay.includes(q.toLowerCase());
+}
+
+function cmdkItems() {
+  const q = (cmdk.q || "").trim().toLowerCase();
+  const items = [];
+  if (cmdk.pick) {
+    const src = listedAgents().filter((a) => a.id && a.id !== "console");
+    for (const a of src) {
+      const label = a.label || agentLabel(a.id);
+      if (!cmdkHit(cmdkHay([label, a.id]), q)) continue;
+      items.push({
+        kind: "agent",
+        id: `agent:${a.id}`,
+        title: label,
+        meta: cmdk.pick.name,
+        agent: a.id,
+        cwd: cmdk.pick.path,
+      });
+    }
+    return items;
+  }
+  for (const s of liveSessions()) {
+    if (!cmdkHit(cmdkHay([sessionLabel(s), projectName(s.cwd), agentLabel(s.agent), s.snippet]), q)) {
+      continue;
+    }
+    const bits = [agentLabel(s.agent), projectName(s.cwd)].filter(Boolean);
+    let busy = "";
+    if (s.choice) busy = "choose";
+    else if (s.subagents?.length) busy = s.subagents.length === 1 ? "1 subagent" : `${s.subagents.length} subagents`;
+    else if (s.busy) busy = "working";
+    items.push({
+      kind: "session",
+      id: s.id,
+      title: sessionLabel(s),
+      meta: bits.join(" · "),
+      busy,
+      active: isActiveRow(s),
+      sess: s,
+    });
+  }
+  if (
+    cmdkHit(cmdkHay(["new session", "draft", state.cwd && projectName(state.cwd), agentLabel(state.agent)]), q)
+  ) {
+    items.push({
+      kind: "draft",
+      id: "draft",
+      title: "New session",
+      meta: state.cwd
+        ? `${projectName(state.cwd)} · ${agentLabel(state.agent)}`
+        : "pick project & agent",
+    });
+  }
+  for (const p of state.projects || []) {
+    if (!cmdkHit(cmdkHay([p.name, p.path]), q)) continue;
+    items.push({
+      kind: "project",
+      id: `proj:${p.path}`,
+      title: p.name || projectName(p.path),
+      meta: "new session",
+      path: p.path,
+      name: p.name || projectName(p.path),
+    });
+  }
+  return items;
+}
+
+function paintCmdkSelection() {
+  const list = $("cmdk-list");
+  list.querySelectorAll(".cmdk-item").forEach((el) => {
+    const on = Number(el.dataset.i) === cmdk.i;
+    el.classList.toggle("on", on);
+    el.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  list.querySelector(".cmdk-item.on")?.scrollIntoView({ block: "nearest" });
+}
+
+function renderCmdk() {
+  const list = $("cmdk-list");
+  const input = $("cmdk-input");
+  cmdk.items = cmdkItems();
+  if (cmdk.i >= cmdk.items.length) cmdk.i = Math.max(0, cmdk.items.length - 1);
+  if (cmdk.i < 0) cmdk.i = 0;
+  input.placeholder = cmdk.pick
+    ? `New session in ${cmdk.pick.name} — pick agent`
+    : "Switch session or start in a project…";
+  list.innerHTML = "";
+  if (!cmdk.items.length) {
+    const empty = document.createElement("div");
+    empty.className = "cmdk-empty";
+    empty.textContent = cmdk.pick ? "No matching agents" : "No matching sessions or projects";
+    list.appendChild(empty);
+    return;
+  }
+  let lastGroup = "";
+  cmdk.items.forEach((item, idx) => {
+    const group =
+      item.kind === "session" ? "Open" : item.kind === "agent" ? "Agent" : "New";
+    if (group !== lastGroup) {
+      lastGroup = group;
+      const head = document.createElement("div");
+      head.className = "cmdk-head";
+      head.textContent = group;
+      list.appendChild(head);
+    }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "cmdk-item" + (idx === cmdk.i ? " on" : "");
+    btn.setAttribute("role", "option");
+    btn.setAttribute("aria-selected", idx === cmdk.i ? "true" : "false");
+    btn.dataset.i = String(idx);
+    const title = document.createElement("span");
+    title.className = "cmdk-title";
+    title.textContent = item.title;
+    const meta = document.createElement("span");
+    meta.className = "cmdk-meta";
+    if (item.busy) {
+      meta.innerHTML = `<span class="busy">${escapeHtml(item.busy)}</span> · ${escapeHtml(item.meta || "")}`;
+    } else {
+      meta.textContent = item.meta || "";
+    }
+    btn.appendChild(title);
+    btn.appendChild(meta);
+    btn.addEventListener("mousemove", () => {
+      if (cmdk.i === idx) return;
+      cmdk.i = idx;
+      paintCmdkSelection();
+    });
+    btn.addEventListener("mousedown", (e) => e.preventDefault());
+    btn.addEventListener("click", () => runCmdk(item));
+    list.appendChild(btn);
+  });
+  paintCmdkSelection();
+}
+
+function openSpotlight() {
+  if (state.settings) closeSettings();
+  setFilterOpen(false);
+  closeMenu();
+  cmdk.open = true;
+  cmdk.q = "";
+  cmdk.pick = null;
+  $("cmdk").hidden = false;
+  $("cmdk-input").value = "";
+  cmdk.items = cmdkItems();
+  const active = cmdk.items.findIndex((it) => it.active);
+  cmdk.i = active >= 0 ? active : 0;
+  renderCmdk();
+  const m = modSym();
+  $("cmdk-hint").innerHTML = `<span>↑↓ / Ctrl+N/P</span><span>↵ open</span><span>esc close</span><span>⌥J/K sessions</span><span>${m}K search</span><span>${m}. interrupt</span>`;
+  requestAnimationFrame(() => $("cmdk-input").focus());
+}
+
+function closeSpotlight() {
+  if (!cmdk.open) return;
+  cmdk.open = false;
+  cmdk.pick = null;
+  $("cmdk").hidden = true;
+  if (state.paneOpen) tuiX?.term?.focus();
+  else if (!state.diffOpen && !$("input").disabled) $("input").focus();
+}
+
+function moveCmdk(dir) {
+  if (!cmdk.items.length) return;
+  cmdk.i = (cmdk.i + dir + cmdk.items.length) % cmdk.items.length;
+  paintCmdkSelection();
+}
+
+function runCmdk(item) {
+  if (!item) return;
+  if (item.kind === "session") {
+    closeSpotlight();
+    if (item.sess?.live && item.sess.id !== state.session?.id) attachSession(item.sess.id);
+    return;
+  }
+  if (item.kind === "draft") {
+    closeSpotlight();
+    openDraft();
+    return;
+  }
+  if (item.kind === "project") {
+    cmdk.pick = { path: item.path, name: item.name };
+    cmdk.q = "";
+    cmdk.i = 0;
+    $("cmdk-input").value = "";
+    renderCmdk();
+    $("cmdk-input").focus();
+    return;
+  }
+  if (item.kind === "agent") {
+    closeSpotlight();
+    openDraft({ cwd: item.cwd, agent: item.agent });
+  }
+}
+
+function cmdkBack() {
+  if (!cmdk.pick) {
+    closeSpotlight();
+    return;
+  }
+  cmdk.pick = null;
+  cmdk.q = "";
+  cmdk.i = 0;
+  $("cmdk-input").value = "";
+  renderCmdk();
+}
+
 function mapTuiKey(e) {
   if (e.metaKey || e.altKey) return null;
   if (e.ctrlKey) {
@@ -2442,14 +2721,7 @@ $("input").addEventListener("keydown", (ev) => {
     $("composer").requestSubmit();
   }
 });
-$("btn-int").addEventListener("click", async () => {
-  if (!state.session) return;
-  try {
-    await api(`/api/sessions/${state.session.id}/interrupt`, { method: "POST", body: "{}" });
-  } catch (err) {
-    setStatus(err.message || String(err));
-  }
-});
+$("btn-int").addEventListener("click", () => interruptSession());
 $("btn-clear").addEventListener("click", () => {
   clearSession();
 });
@@ -2480,23 +2752,145 @@ $("tui").addEventListener("click", (e) => {
   if (e.target.closest("button")) return;
   if (state.paneOpen) tuiX?.term?.focus();
 });
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("agent-filter").hidden) {
+$("cmdk").addEventListener("click", (e) => {
+  if (e.target === $("cmdk")) closeSpotlight();
+});
+$("cmdk-input").addEventListener("input", () => {
+  cmdk.q = $("cmdk-input").value;
+  cmdk.i = 0;
+  renderCmdk();
+});
+$("cmdk-input").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") {
     e.preventDefault();
+    moveCmdk(1);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    moveCmdk(-1);
+  } else if (e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "n") {
+    e.preventDefault();
+    moveCmdk(1);
+  } else if (e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "p") {
+    e.preventDefault();
+    moveCmdk(-1);
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    moveCmdk(e.shiftKey ? -1 : 1);
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    runCmdk(cmdk.items[cmdk.i]);
+  } else if (e.key === "Backspace" && !$("cmdk-input").value && cmdk.pick) {
+    e.preventDefault();
+    cmdkBack();
+  }
+});
+function isModKey(e) {
+  return e.metaKey || e.ctrlKey;
+}
+function isAltLetter(e, letter) {
+  return e.altKey && !e.metaKey && !e.ctrlKey && e.code === "Key" + letter;
+}
+function onGlobalKey(e) {
+  // Option+J/K on Mac sets e.key to ∆/º — match the physical key instead.
+  if (isAltLetter(e, "J") || isAltLetter(e, "K")) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "keydown" && !cmdk.open) {
+      cycleLiveSession(isAltLetter(e, "J") ? 1 : -1);
+    }
+    return;
+  }
+  if (e.type !== "keydown") return;
+  if (e.isComposing) return;
+  const mod = isModKey(e);
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+
+  if (cmdk.open) {
+    if (mod && !e.altKey && key === "k") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSpotlight();
+      return;
+    }
+    if (e.ctrlKey && !e.metaKey && !e.altKey && (key === "n" || key === "p")) {
+      e.preventDefault();
+      e.stopPropagation();
+      moveCmdk(key === "n" ? 1 : -1);
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      cmdkBack();
+    }
+    return;
+  }
+
+  if (mod && !e.altKey && !e.shiftKey && key === "k") {
+    e.preventDefault();
+    e.stopPropagation();
+    openSpotlight();
+    return;
+  }
+
+  if (!mod && !e.altKey && e.key === "/" && !isTextField(e.target) && !state.paneOpen) {
+    e.preventDefault();
+    e.stopPropagation();
+    openSpotlight();
+    return;
+  }
+
+  if (mod && !e.altKey && e.key === ".") {
+    e.preventDefault();
+    e.stopPropagation();
+    interruptSession();
+    return;
+  }
+
+  if (mod && !e.altKey && !e.shiftKey && key === "u") {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleTui();
+    return;
+  }
+
+  if (mod && !e.altKey && !e.shiftKey && key === "j") {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleDiff();
+    return;
+  }
+
+  if (e.key !== "Escape") return;
+  if (!$("agent-filter").hidden) {
+    e.preventDefault();
+    e.stopPropagation();
     setFilterOpen(false);
     return;
   }
-  if (e.key === "Escape" && document.body.classList.contains("menu-open")) {
+  if (document.body.classList.contains("menu-open")) {
     e.preventDefault();
+    e.stopPropagation();
     closeMenu();
     return;
   }
-  if (e.key === "Escape" && state.diffOpen) {
+  if (state.diffOpen) {
     e.preventDefault();
+    e.stopPropagation();
     setDiffOpen(false);
     return;
   }
-  if (e.isComposing) return;
+  if (state.paneOpen) return;
+  if (state.session?.live && state.session.busy && !isConsole()) {
+    e.preventDefault();
+    e.stopPropagation();
+    interruptSession();
+  }
+}
+document.addEventListener("keydown", onGlobalKey, true);
+document.addEventListener("keypress", onGlobalKey, true);
+document.addEventListener("keydown", (e) => {
+  if (e.isComposing || cmdk.open) return;
   if (!state.paneOpen || !state.session?.tmux) return;
   if (hasXterm()) return;
   if (e.target.closest("button, textarea, input, select")) return;

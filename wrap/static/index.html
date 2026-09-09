@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark" />
   <title>wrap — native sessions</title>
   <link rel="stylesheet" href="/static/vendor/xterm.css?v=42" />
-  <link rel="stylesheet" href="/static/style.css?v=42" />
+  <link rel="stylesheet" href="/static/style.css?v=43" />
 </head>
 <body>
   <div id="scrim" hidden></div>
@@ -64,6 +64,18 @@
       </label>
       <button type="button" id="btn-console" class="ghost">Console</button>
     </div>
+    <div id="cmdk" hidden>
+      <div id="cmdk-box" role="dialog" aria-modal="true" aria-labelledby="cmdk-input">
+        <input id="cmdk-input" type="search" placeholder="Switch session or start in a project…" autocomplete="off" spellcheck="false" aria-autocomplete="list" aria-controls="cmdk-list" />
+        <div id="cmdk-list" role="listbox"></div>
+        <footer id="cmdk-hint">
+          <span>↑↓ / Ctrl+N/P</span>
+          <span>↵ open</span>
+          <span>esc close</span>
+          <span>⌥J/K sessions</span>
+        </footer>
+      </div>
+    </div>
     <div id="chat">
       <button type="button" id="btn-diff" class="ghost tiny" hidden>Diff</button>
       <section id="log" class="log"></section>
@@ -117,6 +129,6 @@
   </main>
   <script src="/static/vendor/xterm.min.js?v=42"></script>
   <script src="/static/vendor/addon-fit.min.js?v=42"></script>
-  <script src="/static/app.js?v=42"></script>
+  <script src="/static/app.js?v=45"></script>
 </body>
 </html>
