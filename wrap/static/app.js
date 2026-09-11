@@ -3,6 +3,17 @@ const $ = (id) => document.getElementById(id);
 const AGENT_LABEL = { claude: "Claude", cursor: "Cursor", opencode: "OpenCode", hermes: "Hermes", console: "Console" };
 const FILTER_KEY = "wrap.agentFilter";
 const CWD_KEY = "wrap.cwd";
+const DIFF_SESSION_KEY = "wrap.diffSession";
+
+function readDiffSession() {
+  try {
+    const raw = localStorage.getItem(DIFF_SESSION_KEY);
+    if (raw === null) return true;
+    return raw !== "0";
+  } catch {
+    return true;
+  }
+}
 
 function readStoredCwd() {
   try {
@@ -47,6 +58,7 @@ const state = {
   spawning: false,
   diff: null,
   diffFile: "",
+  diffSession: readDiffSession(),
 };
 
 const PENDING_KEY = "wrap.pending";
@@ -604,7 +616,9 @@ function renderGitDiff() {
   meta.textContent = bits.join(" · ");
   const files = data.files || [];
   if (!files.length) {
-    pane.innerHTML = `<span class="diff-file">working tree clean</span>`;
+    pane.innerHTML = data.scope === "session"
+      ? `<span class="diff-file">no edits in this session</span>`
+      : `<span class="diff-file">working tree clean</span>`;
     return;
   }
   if (!state.diffFile || !files.some((f) => f.path === state.diffFile)) {
@@ -643,6 +657,11 @@ function renderGitDiff() {
 async function loadDiff() {
   const cwd = activeCwd();
   const btn = $("btn-diff");
+  const box = $("diff-session");
+  const wrap = $("diff-session-wrap");
+  const canScope = Boolean(state.session?.id) && !isConsole();
+  if (wrap) wrap.hidden = !canScope;
+  if (box) box.checked = Boolean(state.diffSession);
   if (!cwd || isConsole()) {
     state.diff = null;
     if (btn) {
@@ -653,10 +672,15 @@ async function loadDiff() {
     return;
   }
   try {
-    state.diff = await api("/api/git?cwd=" + encodeURIComponent(cwd));
+    let url = "/api/git?cwd=" + encodeURIComponent(cwd);
+    if (canScope && state.diffSession) {
+      url += "&sid=" + encodeURIComponent(state.session.id);
+    }
+    state.diff = await api(url);
     const n = (state.diff?.ok && state.diff.files) ? state.diff.files.length : 0;
     const nestedN = (state.diff?.ok && state.diff.nested) ? state.diff.nested.length : 0;
-    const dirty = n > 0 || nestedN > 0;
+    const dirtyTotal = Number(state.diff?.dirty_total);
+    const dirty = (Number.isFinite(dirtyTotal) ? dirtyTotal : n) > 0 || nestedN > 0;
     if (btn) {
       btn.hidden = !dirty || state.diffOpen || state.paneOpen;
       btn.textContent = n > 1 ? `Diff · ${n}` : "Diff";
@@ -1095,7 +1119,9 @@ function applyChrome() {
   $("console").hidden = !isConsole(sess);
   $("diff").hidden = !state.diffOpen || isConsole(sess);
   $("composer").hidden = isConsole(sess);
-  const nDiff = (state.diff?.ok && state.diff.files) ? state.diff.files.length : 0;
+  const nFiles = (state.diff?.ok && state.diff.files) ? state.diff.files.length : 0;
+  const dirtyTotal = Number(state.diff?.dirty_total);
+  const nDiff = Number.isFinite(dirtyTotal) ? dirtyTotal : nFiles;
   $("btn-diff").hidden = isConsole(sess) || state.diffOpen || state.paneOpen || nDiff === 0;
   if (viewing) {
     if (sess.agent && sess.agent !== "console") $("agent").value = sess.agent;
@@ -2670,6 +2696,15 @@ $("btn-console").addEventListener("click", async () => {
 $("btn-diff").addEventListener("click", () => setDiffOpen(!state.diffOpen));
 $("btn-diff-close").addEventListener("click", () => setDiffOpen(false));
 $("btn-diff-refresh").addEventListener("click", () => loadDiff());
+$("diff-session").addEventListener("change", () => {
+  state.diffSession = $("diff-session").checked;
+  try {
+    localStorage.setItem(DIFF_SESSION_KEY, state.diffSession ? "1" : "0");
+  } catch (_) {
+    /* ignore */
+  }
+  loadDiff();
+});
 $("model").addEventListener("change", savePrefs);
 $("effort").addEventListener("change", savePrefs);
 $("fast").addEventListener("change", savePrefs);

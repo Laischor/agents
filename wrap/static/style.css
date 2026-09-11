@@ -421,7 +421,20 @@ main {
   font-family: var(--mono); font-size: 13px;
 }
 #diff-meta { font-size: 12px; margin-left: 10px; }
-.diff-actions { display: flex; gap: 6px; }
+.diff-actions { display: flex; gap: 6px; align-items: center; }
+#diff-session-wrap {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 0;
+  white-space: nowrap;
+}
+#diff-session-wrap input { margin: 0; }
 #diff-body {
   flex: 1; min-height: 0;
   display: flex;

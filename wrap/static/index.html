@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark" />
   <title>wrap — native sessions</title>
   <link rel="stylesheet" href="/static/vendor/xterm.css?v=42" />
-  <link rel="stylesheet" href="/static/style.css?v=43" />
+  <link rel="stylesheet" href="/static/style.css?v=44" />
 </head>
 <body>
   <div id="scrim" hidden></div>
@@ -89,6 +89,10 @@
             <span id="diff-meta" class="muted"></span>
           </div>
           <div class="diff-actions">
+            <label class="check" id="diff-session-wrap" hidden>
+              <input type="checkbox" id="diff-session" />
+              This session
+            </label>
             <button type="button" id="btn-diff-refresh" class="ghost tiny">Refresh</button>
             <button type="button" id="btn-diff-close" class="ghost tiny">Close</button>
           </div>
@@ -129,6 +133,6 @@
   </main>
   <script src="/static/vendor/xterm.min.js?v=42"></script>
   <script src="/static/vendor/addon-fit.min.js?v=42"></script>
-  <script src="/static/app.js?v=45"></script>
+  <script src="/static/app.js?v=46"></script>
 </body>
 </html>

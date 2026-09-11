@@ -117,7 +117,113 @@ def unified_replace(path: str, old: str, new: str) -> str:
 
 
 def _input_path(inp: dict[str, Any]) -> str:
-    return str(inp.get("path") or inp.get("file_path") or inp.get("filePath") or "").strip()
+    return str(
+        inp.get("path")
+        or inp.get("file_path")
+        or inp.get("filePath")
+        or inp.get("target_notebook")
+        or inp.get("targetNotebook")
+        or ""
+    ).strip()
+
+
+def _tool_key(name: str) -> str:
+    return re.sub(r"[^a-z]", "", (name or "").split()[0].lower())
+
+
+MUTATE_TOOLS = frozenset(
+    {
+        "write",
+        "edit",
+        "strreplace",
+        "searchreplace",
+        "multiedit",
+        "delete",
+        "deletefile",
+        "removefile",
+        "editnotebook",
+        "notebookedit",
+    }
+)
+_TOUCH_CACHE: dict[str, tuple[int, int, tuple[str, ...]]] = {}
+
+
+def _remember_path(seen: set[str], out: list[str], raw: str) -> None:
+    path = (raw or "").strip()
+    if not path or path in seen:
+        return
+    seen.add(path)
+    out.append(path)
+
+
+def mutate_paths_from_input(name: str, inp: Any) -> list[str]:
+    if _tool_key(name) not in MUTATE_TOOLS or not isinstance(inp, dict):
+        return []
+    path = _input_path(inp)
+    return [path] if path else []
+
+
+def touched_paths_from_messages(messages: list[dict[str, Any]] | None) -> list[str]:
+    """Write/Edit/Delete paths already parsed onto wrap message parts."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for msg in messages or []:
+        for part in msg.get("parts") or []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "diff":
+                _remember_path(seen, out, str(part.get("path") or ""))
+                continue
+            if part.get("type") != "tool":
+                continue
+            name = str(part.get("name") or "")
+            if name.lower().startswith("patch "):
+                _remember_path(seen, out, name.split(" ", 1)[-1])
+    return out
+
+
+def touched_paths_jsonl(path: Path | None) -> list[str]:
+    """Scan a Claude/Cursor jsonl for mutate-tool paths (not just the last 300 turns)."""
+    if path is None or not path.is_file():
+        return []
+    key = str(path)
+    try:
+        st = path.stat()
+        stamp = (int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        return []
+    hit = _TOUCH_CACHE.get(key)
+    if hit and hit[0] == stamp[0] and hit[1] == stamp[1]:
+        return list(hit[2])
+    seen: set[str] = set()
+    out: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or '"tool_use"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = rec.get("message") or rec
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    for p in mutate_paths_from_input(str(block.get("name") or ""), block.get("input")):
+                        _remember_path(seen, out, p)
+    except OSError:
+        return []
+    _TOUCH_CACHE[key] = (stamp[0], stamp[1], tuple(out))
+    if len(_TOUCH_CACHE) > 64:
+        for old in list(_TOUCH_CACHE)[:32]:
+            if old != key:
+                _TOUCH_CACHE.pop(old, None)
+    return out
 
 
 def diffs_from_tool(name: str, inp: Any) -> list[dict[str, str]]:

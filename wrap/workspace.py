@@ -10,7 +10,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-GIT_DIFF_MAX_FILES = 80
+GIT_DIFF_MAX_FILES = 120
 GIT_DIFF_MAX_BYTES = 120_000
 GIT_FILE_MAX_BYTES = 80_000
 GIT_TIMEOUT = 8.0
@@ -287,7 +287,27 @@ def _attach_repo(files: list[dict[str, Any]], repo_root: Path, prefix: str) -> N
             item["path"] = f"{prefix}/{inner}"
 
 
-def git_view(cwd: Path, host_root: Path) -> dict[str, Any]:
+def _norm_git_path(raw: str) -> str:
+    return (raw or "").replace("\\", "/").strip().lstrip("./")
+
+
+def _item_in_session(item: dict[str, Any], touched: list[str]) -> bool:
+    git_path = _norm_git_path(str(item.get("path") or ""))
+    if not git_path:
+        return False
+    needle = "/" + git_path
+    for raw in touched:
+        t = _norm_git_path(raw)
+        if not t:
+            continue
+        if t == git_path or t.endswith(needle):
+            return True
+    return False
+
+
+def git_view(
+    cwd: Path, host_root: Path, only_paths: list[str] | None = None
+) -> dict[str, Any]:
     try:
         root = git_toplevel(cwd)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
@@ -357,7 +377,28 @@ def git_view(cwd: Path, host_root: Path) -> dict[str, Any]:
             for item in files
             if str(item.get("path") or "") not in nested_dirs
         ]
-    files.sort(key=lambda item: (1 if item.get("untracked") else 0, str(item.get("path") or "")))
+    dirty_total = len(files)
+    scoped = bool(only_paths)
+    if scoped:
+        files = [item for item in files if _item_in_session(item, only_paths or [])]
+        by_prefix: dict[str, int] = {}
+        for item in files:
+            prefix = str(item.get("repo") or "")
+            if prefix:
+                by_prefix[prefix] = by_prefix.get(prefix, 0) + 1
+        nested_meta = [
+            {**n, "files": by_prefix.get(str(n.get("path") or ""), 0)}
+            for n in nested_meta
+            if by_prefix.get(str(n.get("path") or ""), 0)
+        ]
+    # Parent repo first so nested clones cannot crowd untracked files off the cap.
+    files.sort(
+        key=lambda item: (
+            1 if item.get("repo") else 0,
+            1 if item.get("untracked") else 0,
+            str(item.get("path") or ""),
+        )
+    )
     truncated_list = len(files) > GIT_DIFF_MAX_FILES
     files = files[:GIT_DIFF_MAX_FILES]
     for item in files:
@@ -381,6 +422,9 @@ def git_view(cwd: Path, host_root: Path) -> dict[str, Any]:
     if nested_file_n:
         extra = f"{nested_file_n} nested"
         stat = f"{stat} · {extra}" if stat else extra
+    if scoped:
+        sess_bit = f"{len(files)} session" if files else "session clean"
+        stat = f"{sess_bit} · {stat}" if stat else sess_bit
     return {
         "ok": True,
         "cwd": str(cwd),
@@ -393,4 +437,7 @@ def git_view(cwd: Path, host_root: Path) -> dict[str, Any]:
         "files": files,
         "nested": nested_meta,
         "truncated_list": truncated_list or nested_scan_truncated,
+        "dirty_total": dirty_total,
+        "scope": "session" if scoped else "repo",
+        "session_paths": len(only_paths or []),
     }

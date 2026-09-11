@@ -1067,7 +1067,12 @@ def start_tmux(
         if prompt:
             # First message as argv — Cursor submits it after resume load.
             # tmux paste+Enter during "Loading conversation" leaves text unsent.
-            args.extend(["--", prompt])
+            # Do not pass a bare `--` unless the prompt looks like a flag;
+            # current CLI includes `--` in the user bubble.
+            if prompt.startswith("-"):
+                args.extend(["--", prompt])
+            else:
+                args.append(prompt)
         extra_env = {
             "TERM": "xterm-256color",
             "DISPLAY": os.environ.get("DISPLAY", ":0"),
@@ -1104,23 +1109,60 @@ def start_tmux(
     if r.returncode != 0:
         err = r.stderr.decode("utf-8", "replace").strip()
         raise RuntimeError(f"tmux new-session failed: {err or r.returncode}")
+    if agent == "cursor":
+        # Keep the pane around long enough to read "Cannot use this model".
+        tmux("set-option", "-t", name, "remain-on-exit", "on")
     return name
 
 
-def cursor_model_arg(model: str, effort: str, fast: bool) -> str:
+def cursor_model_arg(model: str, effort: str = "", fast: bool = False) -> str:
+    """`--model` value the current Cursor CLI will accept.
+
+    Since 2026.09 the CLI lists fully-specified ids (`cursor-grok-4.6-high`,
+    `…-high-fast`). Bracket overlays like `[effort=high,fast=true]` make it
+    exit after a few seconds, which looks like wrap "can't start / resume".
+    Effort and fast live in the catalog slug; wrap's extra widgets are ignored.
+    """
+    _ = effort, fast
     model = (model or "").strip()
     if not model:
         return ""
-    opts: list[str] = []
-    if effort:
-        opts.append(f"effort={effort}")
-    if fast:
-        opts.append("fast=true")
-    if not opts:
-        return model
     if "[" in model:
-        return model
-    return f"{model}[{','.join(opts)}]"
+        model = model.split("[", 1)[0].strip()
+    return model
+
+
+def tmux_pane_dead(name: str) -> bool:
+    r = tmux("display-message", "-t", name, "-p", "#{pane_dead}")
+    return r.returncode == 0 and r.stdout.decode("utf-8", "replace").strip() == "1"
+
+
+def cursor_exit_message(pane: str) -> str:
+    for ln in (pane or "").splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if s.lower().startswith("pane is dead"):
+            continue
+        return s[:400]
+    return "cursor CLI exited"
+
+
+def cursor_wait_boot(name: str, timeout: float = 8.0) -> None:
+    """Fail fast when the CLI rejects --model instead of returning a dead tmux."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        gone = not tmux_has(name) or tmux_pane_dead(name)
+        if gone:
+            err = cursor_exit_message(tmux_capture(name))
+            tmux("kill-session", "-t", name)
+            raise RuntimeError(err)
+        pane = tmux_capture(name)
+        if cursor_composer_ready(pane):
+            tmux("set-option", "-t", name, "remain-on-exit", "off")
+            return
+        time.sleep(0.2)
+    tmux("set-option", "-t", name, "remain-on-exit", "off")
 
 
 def cursor_composer_ready(pane: str) -> bool:
@@ -2087,6 +2129,52 @@ def history_transcript(agent: str, cwd: Path, native_id: str) -> Path | None:
     return None
 
 
+def _oc_touched_paths(oc_id: str, cwd: Path) -> list[str]:
+    if not oc_id:
+        return []
+    try:
+        msgs = oc.list_messages(oc_id, cwd)
+    except RuntimeError:
+        return []
+    return tr.touched_paths_from_messages(msgs)
+
+
+def session_mutate_paths(sid: str, cwd: Path) -> list[str]:
+    """Write/Edit/Delete paths from the wrap session, or empty to mean 'no filter'."""
+    sid = (sid or "").strip()
+    if not sid:
+        return []
+    if sid.startswith("h:"):
+        parts = sid.split(":", 2)
+        if len(parts) != 3:
+            return []
+        agent, native = parts[1], parts[2]
+        if agent == "opencode":
+            return _oc_touched_paths(native, cwd)
+        if agent == "hermes":
+            try:
+                return tr.touched_paths_from_messages(hm.list_messages(native))
+            except RuntimeError:
+                return []
+        path = history_transcript(agent, cwd, native)
+        return tr.touched_paths_jsonl(path)
+    try:
+        sess = get_session(sid)
+    except KeyError:
+        return []
+    agent = str(sess.get("agent") or "")
+    if agent == "opencode":
+        return _oc_touched_paths(str(sess.get("oc_id") or ""), Path(sess.get("cwd") or cwd))
+    if agent == "hermes":
+        try:
+            return tr.touched_paths_from_messages(hm.list_messages(str(sess.get("hm_id") or "")))
+        except RuntimeError:
+            return []
+    raw = sess.get("transcript")
+    path = Path(raw) if raw else pick_transcript(sess)
+    return tr.touched_paths_jsonl(path)
+
+
 def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
     """Read a closed native session without starting the CLI."""
     if agent not in AGENTS:
@@ -2261,6 +2349,8 @@ def open_session(
         resume_id=resume_id,
         prompt=prompt if agent == "cursor" else "",
     )
+    if agent == "cursor":
+        cursor_wait_boot(name)
     path = wait_transcript(
         agent,
         cwd,
@@ -2462,7 +2552,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(st, raw, ct)
             if path == "/api/git":
                 cwd = safe_cwd((qs.get("cwd") or [""])[0])
-                st, raw, ct = json_bytes(ws.git_view(cwd, HOST_PROJECTS))
+                sid = str((qs.get("sid") or [""])[0] or "").strip()
+                only = session_mutate_paths(sid, cwd) if sid else None
+                st, raw, ct = json_bytes(ws.git_view(cwd, HOST_PROJECTS, only_paths=only or None))
                 return self._send(st, raw, ct)
             if path == "/api/console":
                 cwd = safe_cwd((qs.get("cwd") or [""])[0])
