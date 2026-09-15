@@ -804,6 +804,7 @@ function fillSettings() {
   const root = $("settings-agents");
   if (!root) return;
   root.innerHTML = "";
+  root.appendChild(titleSettingsCard());
   for (const a of catalogAgents()) {
     const cat = state.catalog[a.id] || { models: [], effort: [], fast: false };
     const prefs = loadPrefsFor(a.id);
@@ -848,6 +849,81 @@ function fillSettings() {
     }
     root.appendChild(card);
   }
+}
+
+function titleFallbackState() {
+  const t = state.catalog.title || {};
+  return {
+    fallback: t.fallback || { agent: "claude", model: "haiku" },
+    agents: t.agents || [
+      { id: "", label: "Off" },
+      { id: "claude", label: "Claude" },
+      { id: "cursor", label: "Cursor" },
+      { id: "opencode", label: "OpenCode" },
+    ],
+  };
+}
+
+function titleSettingsCard() {
+  const { fallback, agents } = titleFallbackState();
+  const card = document.createElement("article");
+  card.className = "settings-agent settings-titles";
+  const head = document.createElement("h3");
+  head.textContent = "Session titles";
+  card.appendChild(head);
+  const lead = document.createElement("p");
+  lead.className = "lead";
+  lead.textContent =
+    "Fallback used to name Cursor, OpenCode, and Hermes tabs. Claude still names itself.";
+  card.appendChild(lead);
+
+  const agentLab = document.createElement("label");
+  agentLab.append("Fallback");
+  const agentSel = document.createElement("select");
+  fillSelect(agentSel, agents, fallback.agent || "");
+  agentLab.appendChild(agentSel);
+  card.appendChild(agentLab);
+
+  const modelLab = document.createElement("label");
+  modelLab.append("Model");
+  const modelSel = document.createElement("select");
+  const fillModels = () => {
+    const agent = agentSel.value;
+    modelLab.hidden = !agent;
+    if (!agent) {
+      fillSelect(modelSel, [{ id: "", label: "—" }], "");
+      return;
+    }
+    const cat = state.catalog[agent] || { models: [] };
+    const models = sortModels(cat.models || []);
+    fillSelect(modelSel, models.length ? models : [{ id: "", label: "CLI default" }], fallback.model || "");
+  };
+  fillModels();
+  modelLab.appendChild(modelSel);
+  card.appendChild(modelLab);
+
+  const save = async () => {
+    const next = { agent: agentSel.value, model: agentSel.value ? modelSel.value : "" };
+    try {
+      const out = await api("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({ title_fallback: next }),
+      });
+      state.catalog.title = {
+        ...(state.catalog.title || {}),
+        fallback: out.title_fallback || next,
+      };
+    } catch (err) {
+      setStatus(err.message || String(err));
+    }
+  };
+  agentSel.addEventListener("change", () => {
+    fallback.model = "";
+    fillModels();
+    save();
+  });
+  modelSel.addEventListener("change", save);
+  return card;
 }
 
 function openSettings() {
@@ -1091,17 +1167,14 @@ function applyChrome() {
     ? "Send a message or paste a screenshot to start…"
     : viewing && !running
       ? "Send a message to resume this session…"
-      : sess?.agent === "opencode"
-        ? "Message OpenCode… paste a screenshot"
-        : sess?.agent === "hermes"
-          ? "Message Hermes… paste a screenshot"
-          : "Message the native CLI… paste a screenshot";
+      : sess?.agent === "hermes"
+        ? "Message Hermes… paste a screenshot"
+        : "Message the native CLI… paste a screenshot";
   $("btn-send").disabled = !canCompose() || state.paneOpen || state.diffOpen;
   $("input").disabled = !canCompose() || state.paneOpen || state.diffOpen;
   $("btn-int").hidden = !running || isConsole(sess);
   $("btn-int").title = `Interrupt (${modSym()}+.)`;
   $("btn-clear").hidden = !(viewing && sess?.cwd && sess?.agent && sess.agent !== "console");
-  $("btn-stop").hidden = !running || isConsole(sess);
   $("btn-pane").hidden = !(running && sess?.tmux) || isConsole(sess);
   $("btn-pane").title = `TUI (${modSym()}+U)`;
   $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && running && !isConsole(sess) && !state.diffOpen));
@@ -1218,6 +1291,10 @@ function isActiveRow(s) {
   return Boolean(s.native_id && s.native_id === native && s.agent === state.session.agent);
 }
 
+function isWrapLive(s) {
+  return Boolean(s?.live && s.id && !String(s.id).startsWith("h:"));
+}
+
 function sessionRow(s, onClick, onRemove) {
   const li = document.createElement("li");
   if (isActiveRow(s)) li.classList.add("on");
@@ -1251,7 +1328,8 @@ function sessionRow(s, onClick, onRemove) {
   btn.addEventListener("click", onClick);
   li.appendChild(btn);
   const native = s.native_id || s.cli_session || s.oc_id || s.hm_id;
-  if (s.agent === "console" && s.live && s.id) {
+  const wrapLive = isWrapLive(s);
+  if (s.agent === "console" && wrapLive) {
     li.classList.add("has-actions");
     const stop = document.createElement("button");
     stop.type = "button";
@@ -1266,22 +1344,42 @@ function sessionRow(s, onClick, onRemove) {
       stopSession(s);
     });
     li.appendChild(stop);
-  } else if (native && s.agent) {
-    li.classList.add("has-actions");
-    const pin = document.createElement("button");
-    pin.type = "button";
-    pin.className = "sess-pin";
-    pin.setAttribute("aria-label", s.pinned ? "Unpin session" : "Pin session");
-    pin.setAttribute("aria-pressed", s.pinned ? "true" : "false");
-    pin.title = s.pinned ? "Unpin from top" : "Pin to top";
-    pin.innerHTML =
-      '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M10.1 1.4 8.4 3.1l.7 3.1-2.4 2.4-1-.3L3.2 10.8l2.5-2.5-.3-1 2.4-2.4 3.1.7 1.7-1.7-.5-2.5zM4.2 12.2 7 9.4l.9.9-2.8 2.8-.9-.9z"/></svg>';
-    pin.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      togglePin(s);
-    });
-    li.appendChild(pin);
+  } else {
+    if (native && s.agent) {
+      li.classList.add("has-actions");
+      const pin = document.createElement("button");
+      pin.type = "button";
+      pin.className = "sess-pin";
+      pin.setAttribute("aria-label", s.pinned ? "Unpin session" : "Pin session");
+      pin.setAttribute("aria-pressed", s.pinned ? "true" : "false");
+      pin.title = s.pinned ? "Unpin from top" : "Pin to top";
+      pin.innerHTML =
+        '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M10.1 1.4 8.4 3.1l.7 3.1-2.4 2.4-1-.3L3.2 10.8l2.5-2.5-.3-1 2.4-2.4 3.1.7 1.7-1.7-.5-2.5zM4.2 12.2 7 9.4l.9.9-2.8 2.8-.9-.9z"/></svg>';
+      pin.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        togglePin(s);
+      });
+      li.appendChild(pin);
+    }
+    if (wrapLive && s.agent && s.agent !== "console") {
+      li.classList.add("has-actions");
+      const done = document.createElement("button");
+      done.type = "button";
+      done.className = "sess-done";
+      done.setAttribute("aria-label", "Mark session done");
+      done.title = native
+        ? "Done — close in wrap, keep in history"
+        : "Done — close in wrap";
+      done.innerHTML =
+        '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M6.4 11.6 3.2 8.4l1.1-1.1 2.1 2.1 5.2-5.2 1.1 1.1z"/></svg>';
+      done.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        markSessionDone(s);
+      });
+      li.appendChild(done);
+    }
   }
   if (onRemove) {
     li.classList.add("has-actions");
@@ -1511,7 +1609,7 @@ async function loadHealth() {
     const h = await api("/api/health");
     const bits = [
       h.tmux ? "tmux ok" : "tmux missing",
-      h.opencode_serve ? "opencode serve" : h.opencode ? "opencode idle" : "no opencode",
+      h.opencode ? "opencode ok" : "no opencode",
     ];
     if (h.hermes_enabled) {
       bits.push(h.hermes ? "hermes ok" : "hermes down");
@@ -1572,7 +1670,45 @@ function renderSession(sess) {
   closeMenu();
 }
 
+function ensureToolHint() {
+  let el = $("tool-hint");
+  if (el) return el;
+  el = document.createElement("div");
+  el.id = "tool-hint";
+  el.hidden = true;
+  document.body.appendChild(el);
+  return el;
+}
+
+function hideToolHint() {
+  const el = $("tool-hint");
+  if (el) el.hidden = true;
+}
+
+function showToolHint(anchor, text) {
+  const el = ensureToolHint();
+  el.textContent = text;
+  el.hidden = false;
+  const pad = 8;
+  const r = anchor.getBoundingClientRect();
+  let left = r.left;
+  let top = r.bottom + 6;
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  if (left + w > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - w - pad);
+  if (top + h > window.innerHeight - pad) top = r.top - h - 6;
+  if (top < pad) top = pad;
+  el.style.left = `${Math.round(left)}px`;
+  el.style.top = `${Math.round(top)}px`;
+}
+
+function bindToolHint(span, text) {
+  span.addEventListener("pointerenter", () => showToolHint(span, text));
+  span.addEventListener("pointerleave", hideToolHint);
+}
+
 function renderMessages(messages) {
+  hideToolHint();
   const log = $("log");
   log.innerHTML = "";
   const busy = Boolean(state.session?.busy);
@@ -1590,11 +1726,9 @@ function renderMessages(messages) {
     empty.className = "empty";
     empty.textContent = !state.session?.live
       ? "This session is closed. Send a message to resume it."
-      : state.session?.agent === "opencode"
-        ? "Session is up. Send a message — it goes to OpenCode over HTTP."
-        : state.session?.agent === "hermes"
-          ? "Session is up. Send a message — it goes to the Hermes gateway."
-          : "Waiting for the CLI transcript… send a message, bubbles show up here.";
+      : state.session?.agent === "hermes"
+        ? "Session is up. Send a message — it goes to the Hermes gateway."
+        : "Waiting for the CLI transcript… send a message, bubbles show up here.";
     log.appendChild(empty);
     return;
   }
@@ -1614,7 +1748,17 @@ function renderMessages(messages) {
       if (!toolBuf.length) return;
       const tools = document.createElement("div");
       tools.className = "tools";
-      tools.textContent = toolBuf.join(" · ");
+      toolBuf.forEach((item, i) => {
+        if (i) tools.append(" · ");
+        const span = document.createElement("span");
+        span.className = "tool";
+        span.textContent = item.label;
+        if (item.detail) {
+          span.classList.add("has-hint");
+          bindToolHint(span, item.detail);
+        }
+        tools.appendChild(span);
+      });
       el.appendChild(tools);
       toolBuf = [];
     };
@@ -1622,7 +1766,10 @@ function renderMessages(messages) {
       if (p.type === "tool") {
         if (p.name) {
           const running = p.status === "running" || p.status === "pending";
-          toolBuf.push(running ? `${p.name}…` : p.name);
+          toolBuf.push({
+            label: running ? `${p.name}…` : p.name,
+            detail: String(p.detail || "").trim(),
+          });
         }
         continue;
       }
@@ -1971,7 +2118,7 @@ async function wakeClosed(peek, text) {
         effort: $("effort").value || loadPrefsFor(peek.agent).effort || "",
         fast: $("fast").checked,
         title: peek.title || "",
-        text: peek.agent === "cursor" ? text || "" : "",
+        text: "",
       }),
     });
     const oldId = peek.id;
@@ -2148,16 +2295,12 @@ async function sendMessage(ev) {
   state.sending = true;
   $("btn-send").disabled = true;
   try {
-    let viaArgv = false;
     if (!state.session) {
-      const sess = await startSession(state.agent === "cursor" ? text : "");
+      const sess = await startSession("");
       if (!sess) return;
-      viaArgv = state.agent === "cursor" && Boolean(text);
     } else if (!state.session.live) {
-      const agent = state.session.agent;
-      const sess = await wakeClosed(state.session, agent === "cursor" ? text : "");
+      const sess = await wakeClosed(state.session, "");
       if (!sess) return;
-      viaArgv = agent === "cursor" && Boolean(text);
     }
     $("input").value = "";
     fitInput();
@@ -2684,6 +2827,7 @@ $("log").addEventListener("click", (e) => {
   e.preventDefault();
   onCodeCopy(btn);
 });
+$("log").addEventListener("scroll", hideToolHint, { passive: true });
 $("agent").addEventListener("change", () => setAgent($("agent").value));
 $("project").addEventListener("change", () => setProject($("project").value));
 $("btn-console").addEventListener("click", async () => {
@@ -2760,16 +2904,14 @@ $("btn-int").addEventListener("click", () => interruptSession());
 $("btn-clear").addEventListener("click", () => {
   clearSession();
 });
-async function stopSession(sess) {
+async function stopSession(sess, { confirm: ask } = {}) {
   if (!sess?.id) return;
-  const stopMsg = isConsole(sess)
-    ? "Stop this console? The shell exits and it disappears from the list."
-    : sess.agent === "opencode"
-      ? "Close this OpenCode session in wrap? It stays in OpenCode history."
-      : sess.agent === "hermes"
-        ? "Close this Hermes session in wrap? It stays in Hermes history."
-        : "Stop this session? The CLI process exits. Other sessions stay up.";
-  if (!confirm(stopMsg)) return;
+  if (ask !== false) {
+    const stopMsg = isConsole(sess)
+      ? "Stop this console? The shell exits and it disappears from the list."
+      : "Close this session in wrap? It stays in history.";
+    if (!confirm(stopMsg)) return;
+  }
   try {
     await api(`/api/sessions/${sess.id}`, { method: "DELETE" });
     if (state.session?.id === sess.id) clearMain();
@@ -2778,10 +2920,10 @@ async function stopSession(sess) {
     setStatus(err.message || String(err));
   }
 }
-function stopCurrentSession() {
-  return stopSession(state.session);
+
+function markSessionDone(sess) {
+  return stopSession(sess, { confirm: false });
 }
-$("btn-stop").addEventListener("click", () => stopCurrentSession());
 $("btn-pane").addEventListener("click", () => setPaneOpen(!state.paneOpen));
 $("tui").addEventListener("click", (e) => {
   if (e.target.closest("button")) return;

@@ -157,13 +157,13 @@ services:
       # Dummy display so Cursor CLI enables linux clipboard image paste (xclip stubs)
       DISPLAY: ":0"
       HOST_PROJECTS: ${HOST_PROJECTS}
-      # wrap: native Claude/Cursor tmux + OpenCode HTTP (no extra harness)
+      # wrap: headless Claude/Cursor/OpenCode CLI turns (no extra harness)
       AGENTS_WRAP_SERVE: ${AGENTS_WRAP_SERVE:-1}
       WRAP_HOST: "0.0.0.0"
       WRAP_PORT: "3000"
       WRAP_PUBLIC_URL: ${WRAP_PUBLIC_URL:-http://127.0.0.1:3000}
-      # Own OpenCode HTTP port — leave the default :4096 free
-      WRAP_OPENCODE_PORT: "4097"
+      WRAP_TITLE: ${WRAP_TITLE:-1}
+      WRAP_TITLE_MODEL: ${WRAP_TITLE_MODEL:-haiku}
       # Hermes as a wrap agent when HERMES=1 (gateway on the compose network)
       HERMES: ${HERMES:-0}
       HERMES_API_SERVER_KEY: ${HERMES_API_SERVER_KEY:-}

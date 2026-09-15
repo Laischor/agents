@@ -14,6 +14,8 @@ TIMESTAMP_RE = re.compile(r"<timestamp>[\s\S]*?</timestamp>\s*")
 COMMAND_NAME_RE = re.compile(r"<command-name>([^<]+)</command-name>")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 WRAP_DEFAULT_TITLE_RE = re.compile(r" · (claude|cursor|opencode|hermes)( · |$)", re.I)
+# Claude auto names: "{cwd}-{2 hex}" e.g. tsttool-69 (nameSource=derived).
+CLAUDE_DERIVED_TITLE_RE = re.compile(r"^(.+)-[0-9a-fA-F]{2}$")
 HARNESS_USER_TAG_RE = re.compile(
     r"^<(dynamic_tools|dynamic_tool_namespaces|system_notification|"
     r"agent_transcripts|user_info|git_status|agent_skills|"
@@ -129,6 +131,115 @@ def _input_path(inp: dict[str, Any]) -> str:
 
 def _tool_key(name: str) -> str:
     return re.sub(r"[^a-z]", "", (name or "").split()[0].lower())
+
+
+_HINT_MAX = 240
+
+
+def _clip_hint(text: str, n: int = _HINT_MAX) -> str:
+    t = " ".join((text or "").split())
+    if len(t) <= n:
+        return t
+    return t[: n - 1].rstrip() + "…"
+
+
+def _first_str(inp: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        val = inp.get(key)
+        if val is None or isinstance(val, (dict, list)):
+            continue
+        s = str(val).strip()
+        if s:
+            return s
+    return ""
+
+
+def _short_path(path: str) -> str:
+    p = (path or "").strip().replace("\\", "/")
+    if not p:
+        return ""
+    home = str(Path.home()).replace("\\", "/")
+    if p == home:
+        return "~"
+    if p.startswith(home + "/"):
+        p = "~/" + p[len(home) + 1 :]
+    if len(p) <= 72:
+        return p
+    parts = [bit for bit in p.split("/") if bit]
+    if len(parts) >= 2:
+        return "…/" + "/".join(parts[-2:])
+    return parts[-1] if parts else p
+
+
+def _as_tool_input(inp: Any) -> dict[str, Any]:
+    if isinstance(inp, dict):
+        return inp
+    if not isinstance(inp, str):
+        return {}
+    raw = inp.strip()
+    if not raw:
+        return {}
+    if raw[0] in "{[":
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"command": raw}
+        if isinstance(data, dict):
+            return data
+    return {"command": raw}
+
+
+def _todo_hint(inp: dict[str, Any]) -> str:
+    todos = inp.get("todos") or inp.get("items") or []
+    if not isinstance(todos, list):
+        return ""
+    bits: list[str] = []
+    for item in todos[:6]:
+        if isinstance(item, dict):
+            text = str(item.get("content") or item.get("title") or item.get("text") or "").strip()
+        else:
+            text = str(item).strip()
+        if text:
+            bits.append(text)
+    return _clip_hint("; ".join(bits))
+
+
+def tool_hint(name: str, inp: Any) -> str:
+    """Short line for a wrap tool-call hover: command, path, pattern, …"""
+    data = _as_tool_input(inp)
+    if not data:
+        return ""
+    key = _tool_key(name)
+    cmd = _first_str(data, "command", "cmd")
+    path = _short_path(_input_path(data))
+    pattern = _first_str(data, "pattern", "glob_pattern", "glob", "regex")
+    query = _first_str(data, "query", "search_term", "searchTerm", "q")
+    url = _first_str(data, "url")
+    desc = _first_str(data, "description")
+    prompt = _first_str(data, "prompt")
+    if key in ("bash", "shell", "powershell"):
+        return _clip_hint(cmd or desc)
+    if key in ("grep", "rg"):
+        glob = _first_str(data, "glob")
+        return _clip_hint(" · ".join(x for x in (pattern or query, glob, path) if x))
+    if key in ("glob",):
+        loc = _short_path(_first_str(data, "target_directory", "directory"))
+        return _clip_hint(" · ".join(x for x in (pattern, loc or path) if x))
+    if key in ("webfetch", "fetch"):
+        return _clip_hint(url)
+    if key in ("websearch", "search"):
+        return _clip_hint(query or pattern)
+    if key in ("todowrite", "todoread"):
+        return _todo_hint(data)
+    if key in ("agent", "task", "skill"):
+        return _clip_hint(desc or prompt or _first_str(data, "skill", "subagent_type"))
+    if path:
+        extra = _first_str(data, "offset")
+        return _clip_hint(f"{path}:{extra}" if extra else path)
+    for val in (cmd, url, pattern, query, desc, prompt):
+        if val:
+            return _clip_hint(val)
+    return ""
 
 
 MUTATE_TOOLS = frozenset(
@@ -297,7 +408,11 @@ def _content_parts(content: Any, *, as_user: bool = False) -> list[dict[str, Any
                 for h in hunks:
                     parts.append({"type": "diff", **h})
             else:
-                parts.append({"type": "tool", "name": name})
+                item: dict[str, Any] = {"type": "tool", "name": name}
+                hint = tool_hint(name, block.get("input"))
+                if hint:
+                    item["detail"] = hint
+                parts.append(item)
         elif kind == "tool_result":
             saw_tool_result = True
         elif kind == "thinking":
@@ -779,6 +894,16 @@ def is_wrap_default_title(title: str) -> bool:
     return bool(WRAP_DEFAULT_TITLE_RE.search(title or ""))
 
 
+def is_claude_derived_title(title: str, cwd: str | Path | None = None) -> bool:
+    """True for Claude's auto slug `{project}-{2 hex}`, optionally scoped to cwd."""
+    m = CLAUDE_DERIVED_TITLE_RE.fullmatch((title or "").strip())
+    if not m:
+        return False
+    if cwd:
+        return m.group(1) == Path(str(cwd)).name
+    return True
+
+
 def _last_jsonl_ai_title(path: Path, tail: int = 262144) -> str | None:
     if not path.is_file():
         return None
@@ -805,6 +930,77 @@ def _last_jsonl_ai_title(path: Path, tail: int = 262144) -> str | None:
         if isinstance(val, str) and val.strip():
             last = val.strip()
     return last
+
+
+def last_jsonl_custom_title(path: Path, tail: int = 262144) -> str | None:
+    """`--name` / customTitle from jsonl (wrap placeholder or a user rename)."""
+    if not path or not path.is_file():
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) > tail:
+        data = data[-tail:]
+        nl = data.find(b"\n")
+        if nl != -1:
+            data = data[nl + 1 :]
+    last: str | None = None
+    for line in data.decode("utf-8", "replace").splitlines():
+        if "customTitle" not in line and "custom-title" not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("type") != "custom-title":
+            continue
+        val = rec.get("customTitle") or rec.get("title") or ""
+        if isinstance(val, str) and val.strip():
+            last = val.strip()
+    return last
+
+
+def first_user_title(path: Path, max_len: int = 72) -> str | None:
+    """First real user prompt, clipped for a tab title. -p rarely writes ai-title."""
+    if not path or not path.is_file():
+        return None
+    try:
+        fh = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("isSidechain") or rec.get("isMeta") or rec.get("type") != "user":
+                continue
+            origin = (rec.get("origin") or {}).get("kind")
+            if origin in ("tool", "task-notification") or rec.get("toolUseResult") is not None:
+                continue
+            msg = rec.get("message") or {}
+            content = msg.get("content")
+            text = ""
+            if isinstance(content, str):
+                text = extract_user_query(content)
+            elif isinstance(content, list):
+                bits = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        bits.append(extract_user_query(block.get("text") or ""))
+                text = "\n".join(bits)
+            text = " ".join((text or "").split())
+            if not text or is_injected_user_message(text) or is_wrap_default_title(text):
+                continue
+            if len(text) > max_len:
+                text = text[: max_len - 1].rstrip() + "…"
+            return text
+    return None
 
 
 def claude_registry_names(claude_home: Path) -> dict[str, dict[str, str]]:
@@ -871,13 +1067,13 @@ def native_session_title(
         registry = claude_registry_names(claude_home)
     reg = registry.get(sid) or {}
     renamed = (reg.get("name") or "").strip()
-    if renamed and reg.get("nameSource") == "user" and not is_wrap_default_title(renamed):
+    source = str(reg.get("nameSource") or "")
+    # "derived" is Claude's auto slug (tsttool-69), not a real title.
+    if renamed and source == "user" and not is_wrap_default_title(renamed):
         return renamed
     ai = _last_jsonl_ai_title(transcript) if transcript else None
-    if ai:
+    if ai and not is_wrap_default_title(ai):
         return ai
-    if renamed and not is_wrap_default_title(renamed):
-        return renamed
     return None
 
 

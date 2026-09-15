@@ -201,7 +201,7 @@ h2 {
   width: auto;
 }
 #closed li .sess-drop, #sessions li .sess-pin, #closed li .sess-pin,
-#sessions li .sess-stop {
+#sessions li .sess-stop, #sessions li .sess-done {
   flex: 0 0 28px;
   width: 28px;
   padding: 0;
@@ -227,6 +227,11 @@ h2 {
 #sessions li .sess-pin:hover, #closed li .sess-pin:hover,
 #sessions li .sess-pin[aria-pressed="true"], #closed li .sess-pin[aria-pressed="true"] {
   color: var(--accent);
+  background: var(--bg-3);
+  opacity: 1;
+}
+#sessions li .sess-done:hover {
+  color: var(--accent-2);
   background: var(--bg-3);
   opacity: 1;
 }
@@ -336,6 +341,11 @@ main {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
+}
+.settings-titles .lead {
+  grid-column: 1 / -1;
+  margin: 0;
+  max-width: none;
 }
 .settings-agent label {
   display: flex;
@@ -623,6 +633,28 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .msg.assistant { background: var(--assistant); border: 1px solid var(--line); }
 .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 6px; letter-spacing: 0.04em; }
 .msg .tools { font-family: var(--mono); font-size: 11px; color: var(--accent); margin-top: 8px; }
+.msg .tools .tool.has-hint {
+  cursor: help;
+  border-bottom: 1px dotted rgba(196, 163, 90, 0.55);
+}
+#tool-hint {
+  position: fixed;
+  z-index: 80;
+  max-width: min(420px, calc(100vw - 16px));
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-3);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+#tool-hint[hidden] { display: none !important; }
 .msg .diff {
   margin-top: 10px;
   border: 1px solid var(--line);

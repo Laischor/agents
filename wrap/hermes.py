@@ -741,7 +741,11 @@ def message_from_api(row: Any) -> dict[str, Any] | None:
             continue
         fn = call.get("function") if isinstance(call.get("function"), dict) else {}
         name = str(fn.get("name") or call.get("name") or "tool")
-        parts.append({"type": "tool", "name": name, "status": "completed"})
+        hint = tr.tool_hint(name, fn.get("arguments") or call.get("arguments") or call.get("input"))
+        item: dict[str, Any] = {"type": "tool", "name": name, "status": "completed"}
+        if hint:
+            item["detail"] = hint
+        parts.append(item)
     if not parts:
         return None
     text = "\n\n".join(p.get("text") or "" for p in parts if p.get("type") == "text").strip()

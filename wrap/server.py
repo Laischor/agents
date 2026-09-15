@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Native-session web wrap: tmux + transcripts (Claude/Cursor), OpenCode HTTP API.
-
-No extra model harness — Claude/Cursor stay on the live CLI; OpenCode uses
-`opencode serve` REST + SSE. Hermes (when HERMES=1) uses the gateway API.
-"""
+"""Native-session web wrap: headless CLI turns, Hermes API, console tmux."""
 
 from __future__ import annotations
 
@@ -13,6 +9,8 @@ import json
 import os
 import re
 import secrets
+import select
+import signal
 import subprocess
 import sys
 import threading
@@ -31,6 +29,7 @@ if str(ROOT) not in sys.path:
 
 import hermes as hm  # noqa: E402
 import opencode as oc  # noqa: E402
+import titles  # noqa: E402
 import transcripts as tr  # noqa: E402
 import workspace as ws  # noqa: E402
 
@@ -124,6 +123,22 @@ _send_buf: dict[str, list[str]] = {}
 _send_workers: dict[str, threading.Thread] = {}
 _sending: set[str] = set()
 _busy_hold: dict[str, float] = {}
+# Headless claude -p: running query processes per wrap sid (PID file handles).
+_hl_procs: dict[str, subprocess.Popen[bytes]] = {}
+# Pending can_use_tool request awaiting a web answer (public choice + wire payload).
+_hl_choices: dict[str, dict[str, Any]] = {}
+_hl_pending: dict[str, dict[str, Any]] = {}
+_hl_stdin_lock = threading.Lock()
+_title_inflight: set[str] = set()
+_title_tried_at: dict[str, float] = {}
+_TITLE_MAX = 4
+_TITLE_RETRY_SEC = 90.0
+_TITLE_EMPTY_SEC = 8.0
+# Fallback namer for Cursor / OpenCode / Hermes. Empty agent = off.
+TITLE_FALLBACK: dict[str, str] = {
+    "agent": "claude" if titles.enabled() else "",
+    "model": titles.model() if titles.enabled() else "",
+}
 _alerts: deque[dict[str, Any]] = deque(maxlen=80)
 _alert_cv = threading.Condition()
 _alert_seq = 0
@@ -144,9 +159,11 @@ def hermes_on() -> bool:
 def http_live(sess: dict[str, Any]) -> bool:
     agent = sess.get("agent")
     if agent == "opencode":
-        return bool(sess.get("oc_id"))
+        return True
     if agent == "hermes":
         return bool(sess.get("hm_id"))
+    if agent in ("claude", "cursor"):
+        return bool(sess.get("cli_session"))
     return False
 
 
@@ -472,13 +489,6 @@ def shutil_which(name: str) -> str | None:
     return which(name)
 
 
-def _oc_warmup() -> None:
-    try:
-        oc.ensure_serve()
-    except Exception as exc:  # noqa: BLE001
-        log(f"opencode warmup: {exc}")
-
-
 def tmux_ok() -> bool:
     return shutil_which("tmux") is not None
 
@@ -665,8 +675,8 @@ def session_is_working(sess: dict[str, Any], pane: str = "", *, hold: bool = Tru
     if sess.get("tmux"):
         text = pane if pane else tmux_capture(str(sess["tmux"]))
         busy = busy or pane_busy(text)
-    elif sess.get("agent") == "opencode" and sess.get("oc_id"):
-        busy = busy or oc.session_busy(str(sess["oc_id"]), sess.get("cwd") or "")
+    elif sess.get("agent") in ("claude", "cursor", "opencode") and not sess.get("tmux"):
+        busy = busy or hl_running(sid) or bool(hl_choice(sess))
     elif sess.get("agent") == "hermes" and sess.get("hm_id"):
         busy = busy or hm.session_busy(str(sess["hm_id"]))
     if not busy and sess.get("agent") == "claude":
@@ -824,9 +834,7 @@ def pane_prompt_choice(pane: str) -> dict[str, Any] | None:
 
 def session_choice(sess: dict[str, Any], pane: str | None = None) -> dict[str, Any] | None:
     agent = str(sess.get("agent") or "")
-    if agent == "opencode" and sess.get("oc_id"):
-        return oc.pending_choice(str(sess["oc_id"]), sess.get("cwd") or "")
-    if agent == "hermes":
+    if agent in ("opencode", "hermes"):
         return None
     if agent not in ("claude", "cursor"):
         return None
@@ -836,6 +844,10 @@ def session_choice(sess: dict[str, Any], pane: str | None = None) -> dict[str, A
         live = pane_prompt_choice(text)
         if live:
             return live
+    elif agent == "claude":
+        # Headless permissions come from can_use_tool, not jsonl (which would
+        # double-prompt AskUserQuestion and cannot be answered after -p exits).
+        return hl_choice(sess)
     # Cursor writes AskQuestion to jsonl only after the user already answered.
     if agent == "cursor":
         return None
@@ -875,29 +887,6 @@ def send_checkbox_choice_keys(name: str, picks: list[int]) -> None:
             tmux_send_keys(name, ["Enter"])
 
 
-def apply_oc_choice(sess: dict[str, Any], choice: dict[str, Any], picks: list[int]) -> None:
-    oc_id = str(sess.get("oc_id") or "")
-    cwd = Path(sess["cwd"])
-    kind = str(choice.get("kind") or "")
-    questions = choice.get("questions") or []
-    if kind == "permission":
-        opts = (questions[0] or {}).get("options") or []
-        reply = str((opts[picks[0]] or {}).get("reply") or "")
-        if reply not in ("once", "always", "reject"):
-            reply = ("once", "always", "reject")[picks[0]]
-        oc.reply_permission(oc_id, str(choice["id"]), cwd, reply)
-        return
-    if kind == "question":
-        answers: list[list[str]] = []
-        for i, n in enumerate(picks):
-            opts = (questions[i] or {}).get("options") or []
-            label = str((opts[n] or {}).get("label") or "")
-            answers.append([label] if label else [])
-        oc.reply_question(str(choice["id"]), cwd, answers)
-        return
-    raise RuntimeError("unknown OpenCode choice")
-
-
 def tmux_alive_command(name: str) -> str:
     r = tmux("display-message", "-t", name, "-p", "#{pane_current_command}")
     if r.returncode != 0:
@@ -913,6 +902,7 @@ def persist_state() -> None:
             "hidden": sorted(HIDDEN),
             "pinned": list(PINNED),
             "hermes_cwd": hm.cwd_map(),
+            "title_fallback": dict(TITLE_FALLBACK),
         }
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
@@ -934,6 +924,9 @@ def load_state() -> None:
     hermes_cwd = data.get("hermes_cwd")
     if isinstance(hermes_cwd, dict):
         hm.load_cwd_map({str(k): str(v) for k, v in hermes_cwd.items() if k and v})
+    raw_fb = data.get("title_fallback")
+    if isinstance(raw_fb, dict):
+        TITLE_FALLBACK.update(_normalize_title_fallback(raw_fb))
     with _lock:
         HIDDEN.clear()
         PINNED.clear()
@@ -990,17 +983,33 @@ def apply_native_title(
     persist: bool = False,
     registry: dict[str, dict[str, str]] | None = None,
 ) -> bool:
-    """Replace wrap's placeholder title with the name the agent assigned."""
+    """Swap wrap's placeholder tab name for the agent's own title."""
     if sess.get("agent") == "console":
         return False
+    if sess.get("title_source") in ("llm", "user"):
+        return False
     native = ""
+    cwd = sess.get("cwd") or ""
     if sess.get("agent") == "opencode" and sess.get("oc_id"):
-        native = oc.inferred_title(str(sess["oc_id"]), sess.get("cwd") or "")
+        info = oc.get_session(str(sess["oc_id"]), cwd)
+        native = oc.display_title(info, cwd)
+        if oc.is_placeholder_title(native, cwd):
+            native = ""
     elif sess.get("agent") == "hermes" and sess.get("hm_id"):
-        native = hm.inferred_title(str(sess["hm_id"]), sess.get("cwd") or "")
+        info = hm.get_session(str(sess["hm_id"]))
+        native = str((info or {}).get("title") or "").strip()
+        if not native or tr.is_wrap_default_title(native):
+            native = ""
+        proj = Path(str(cwd)).name if cwd else ""
+        if proj and native == proj:
+            native = ""
     elif sess.get("tmux") and tmux_has(str(sess["tmux"])):
         pane_title = tmux_pane_title(str(sess["tmux"]))
-        if pane_title and not tr.is_wrap_default_title(pane_title):
+        if (
+            pane_title
+            and not tr.is_wrap_default_title(pane_title)
+            and not tr.is_claude_derived_title(pane_title, sess.get("cwd"))
+        ):
             native = pane_title
     if not native and sess.get("agent") not in ("opencode", "hermes"):
         path = sess.get("transcript")
@@ -1012,117 +1021,173 @@ def apply_native_title(
             cursor_home=CURSOR_HOME,
             registry=registry,
         ) or ""
-    if not native or sess.get("title") == native:
+    if native:
+        if sess.get("title") == native:
+            return False
+        sess["title"] = native
+        sess["title_source"] = "native"
+        if persist:
+            persist_state()
+        return True
+    if sess.get("title_source") in ("llm", "user"):
         return False
-    sess["title"] = native
-    if persist:
-        persist_state()
+    if str(sess.get("agent") or "") == "claude":
+        path = sess.get("transcript")
+        first = tr.first_user_title(Path(path)) if path else None
+        cur = str(sess.get("title") or "")
+        placeholder = (
+            not cur
+            or tr.is_wrap_default_title(cur)
+            or tr.is_claude_derived_title(cur, sess.get("cwd"))
+        )
+        if first and placeholder and cur != first:
+            sess["title"] = first
+            sess["title_source"] = "prompt"
+            if persist:
+                persist_state()
+            return True
+        if tr.is_claude_derived_title(cur, sess.get("cwd")):
+            restored = ""
+            if path:
+                restored = tr.last_jsonl_custom_title(Path(path)) or ""
+            if not restored or tr.is_claude_derived_title(restored, sess.get("cwd")):
+                restored = default_title(
+                    "claude",
+                    Path(str(sess.get("cwd") or ".")),
+                    str(sess.get("model") or ""),
+                    str(sess.get("effort") or ""),
+                )
+            if restored != cur:
+                sess["title"] = restored
+                sess["title_source"] = "wrap"
+                if persist:
+                    persist_state()
+                return True
+    return False
+
+
+def _normalize_title_fallback(raw: dict[str, Any] | None) -> dict[str, str]:
+    data = raw if isinstance(raw, dict) else {}
+    agent = str(data.get("agent") or "").strip()
+    if agent not in ("", "claude", "cursor", "opencode"):
+        agent = ""
+    model = str(data.get("model") or "").strip()[:120]
+    if not agent:
+        model = ""
+    return {"agent": agent, "model": model}
+
+
+def title_fallback() -> dict[str, str]:
+    with _lock:
+        return dict(TITLE_FALLBACK)
+
+
+def set_title_fallback(raw: dict[str, Any] | None) -> dict[str, str]:
+    parsed = _normalize_title_fallback(raw)
+    with _lock:
+        TITLE_FALLBACK.clear()
+        TITLE_FALLBACK.update(parsed)
+    persist_state()
+    return parsed
+
+
+def _title_needs_llm(sess: dict[str, Any]) -> bool:
+    agent = str(sess.get("agent") or "")
+    if agent in ("", "console"):
+        return False
+    if sess.get("title_source") in ("llm", "native", "user"):
+        return False
+    sid = str(sess.get("id") or "")
+    if not sid:
+        return False
+    with _lock:
+        if sid in _title_inflight:
+            return False
+        last = _title_tried_at.get(sid, 0.0)
+    if last and time.time() - last < _TITLE_RETRY_SEC:
+        return False
+    if agent == "claude":
+        if not titles.enabled():
+            return False
+        path = sess.get("transcript")
+        if not path or not Path(path).is_file():
+            return False
+        if not tr.first_user_title(Path(path)):
+            return False
+        return True
+    fb = title_fallback()
+    if not fb.get("agent"):
+        return False
+    if agent == "opencode" and not sess.get("oc_id"):
+        return False
+    if agent == "hermes" and not sess.get("hm_id"):
+        return False
+    if agent == "cursor":
+        path = sess.get("transcript")
+        if not path or not Path(path).is_file():
+            return False
     return True
 
 
-def start_tmux(
-    sid: str,
-    agent: str,
-    cwd: Path,
-    *,
-    model: str,
-    effort: str,
-    fast: bool,
-    title: str,
-    cli_session: str = "",
-    resume_id: str = "",
-    prompt: str = "",
-) -> str:
-    name = tmux_name(sid)
-    if tmux_has(name):
-        return name
-    if agent == "claude":
-        binary = shutil_which("claude") or "claude"
-        args = [binary]
-        if model:
-            args.extend(["--model", model])
-        if effort:
-            args.extend(["--effort", effort])
-        if title and not resume_id:
-            args.extend(["--name", title[:40]])
-        if resume_id:
-            args.extend(["--resume", resume_id])
-        elif cli_session:
-            args.extend(["--session-id", cli_session])
-        extra_env = {
-            "CLAUDE_CODE_DISABLE_MOUSE": "1",
-            "CLAUDE_CODE_NO_FLICKER": "1",
-            "TERM": "xterm-256color",
-            "IS_SANDBOX": os.environ.get("IS_SANDBOX", "1"),
-        }
-    elif agent == "cursor":
-        binary = shutil_which("agent") or shutil_which("cursor-agent") or "agent"
-        model_arg = cursor_model_arg(model, effort, fast)
-        args = [binary, "--trust", "--approve-mcps"]
-        if model_arg:
-            args.extend(["--model", model_arg])
-        if resume_id:
-            args.append(f"--resume={resume_id}")
-        prompt = (prompt or "").strip()
-        if prompt:
-            # First message as argv — Cursor submits it after resume load.
-            # tmux paste+Enter during "Loading conversation" leaves text unsent.
-            # Do not pass a bare `--` unless the prompt looks like a flag;
-            # current CLI includes `--` in the user bubble.
-            if prompt.startswith("-"):
-                args.extend(["--", prompt])
-            else:
-                args.append(prompt)
-        extra_env = {
-            "TERM": "xterm-256color",
-            "DISPLAY": os.environ.get("DISPLAY", ":0"),
-        }
-    else:
-        raise ValueError("tmux is only for claude/cursor")
+def maybe_title_session(sess: dict[str, Any]) -> None:
+    """Name a wrap tab from the first turns (Haiku or settings fallback)."""
+    if not _title_needs_llm(sess):
+        return
+    sid = str(sess["id"])
+    with _lock:
+        if sid in _title_inflight or len(_title_inflight) >= _TITLE_MAX:
+            return
+        _title_inflight.add(sid)
+        _title_tried_at[sid] = time.time()
+    threading.Thread(
+        target=_title_worker,
+        args=(sid,),
+        daemon=True,
+        name=f"wrap-title-{sid}",
+    ).start()
 
-    hook_bin = str(ROOT / "bin")
-    path = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-    if hook_bin not in path.split(":"):
-        path = hook_bin + ":" + path
-    extra_env["PATH"] = path
-    extra_env["WRAP_SESSION_ID"] = sid
-    extra_env["WRAP_URL"] = f"http://127.0.0.1:{PORT}"
 
-    env_args: list[str] = []
-    for k, v in extra_env.items():
-        env_args.extend(["-e", f"{k}={v}"])
-    r = tmux(
-        "new-session",
-        "-d",
-        "-s",
-        name,
-        "-c",
-        str(cwd),
-        "-x",
-        "140",
-        "-y",
-        "48",
-        *env_args,
-        "--",
-        *args,
-    )
-    if r.returncode != 0:
-        err = r.stderr.decode("utf-8", "replace").strip()
-        raise RuntimeError(f"tmux new-session failed: {err or r.returncode}")
-    if agent == "cursor":
-        # Keep the pane around long enough to read "Cannot use this model".
-        tmux("set-option", "-t", name, "remain-on-exit", "on")
-    return name
+def _title_worker(sid: str) -> None:
+    try:
+        try:
+            sess = get_session(sid)
+        except KeyError:
+            return
+        agent = str(sess.get("agent") or "")
+        msgs = load_messages(sess)
+        blob = titles.snippet(msgs)
+        if len(blob) < 8:
+            with _lock:
+                _title_tried_at[sid] = time.time() - _TITLE_RETRY_SEC + _TITLE_EMPTY_SEC
+            return
+        if agent == "claude":
+            name = titles.generate(blob, agent="claude", model=titles.model())
+        else:
+            fb = title_fallback()
+            name = titles.generate(blob, agent=fb.get("agent") or "", model=fb.get("model") or "")
+        if not name:
+            log(f"title skip {sid}: empty")
+            return
+        try:
+            sess = get_session(sid)
+        except KeyError:
+            return
+        if sess.get("title_source") in ("native", "user"):
+            return
+        with _lock:
+            sess["title"] = name
+            sess["title_source"] = "llm"
+        persist_state()
+        log(f"title {sid}: {name}")
+    except Exception as exc:  # noqa: BLE001
+        log(f"title fail {sid}: {exc}")
+    finally:
+        with _lock:
+            _title_inflight.discard(sid)
 
 
 def cursor_model_arg(model: str, effort: str = "", fast: bool = False) -> str:
-    """`--model` value the current Cursor CLI will accept.
-
-    Since 2026.09 the CLI lists fully-specified ids (`cursor-grok-4.6-high`,
-    `…-high-fast`). Bracket overlays like `[effort=high,fast=true]` make it
-    exit after a few seconds, which looks like wrap "can't start / resume".
-    Effort and fast live in the catalog slug; wrap's extra widgets are ignored.
-    """
+    """Strip `[effort=…]` overlays; Cursor CLI only accepts catalog slugs."""
     _ = effort, fast
     model = (model or "").strip()
     if not model:
@@ -1130,39 +1195,6 @@ def cursor_model_arg(model: str, effort: str = "", fast: bool = False) -> str:
     if "[" in model:
         model = model.split("[", 1)[0].strip()
     return model
-
-
-def tmux_pane_dead(name: str) -> bool:
-    r = tmux("display-message", "-t", name, "-p", "#{pane_dead}")
-    return r.returncode == 0 and r.stdout.decode("utf-8", "replace").strip() == "1"
-
-
-def cursor_exit_message(pane: str) -> str:
-    for ln in (pane or "").splitlines():
-        s = ln.strip()
-        if not s:
-            continue
-        if s.lower().startswith("pane is dead"):
-            continue
-        return s[:400]
-    return "cursor CLI exited"
-
-
-def cursor_wait_boot(name: str, timeout: float = 8.0) -> None:
-    """Fail fast when the CLI rejects --model instead of returning a dead tmux."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        gone = not tmux_has(name) or tmux_pane_dead(name)
-        if gone:
-            err = cursor_exit_message(tmux_capture(name))
-            tmux("kill-session", "-t", name)
-            raise RuntimeError(err)
-        pane = tmux_capture(name)
-        if cursor_composer_ready(pane):
-            tmux("set-option", "-t", name, "remain-on-exit", "off")
-            return
-        time.sleep(0.2)
-    tmux("set-option", "-t", name, "remain-on-exit", "off")
 
 
 def cursor_composer_ready(pane: str) -> bool:
@@ -1298,19 +1330,699 @@ def tmux_send_text(name: str, text: str, *, agent: str = "") -> None:
     tmux("send-keys", "-t", name, "Enter")
 
 
-def oc_send_text(sess: dict[str, Any], text: str) -> None:
-    oc_id = sess.get("oc_id")
-    if not oc_id:
-        raise RuntimeError("no opencode session")
+HL_PROC_DIR = STATE_PATH.parent / "headless"
+HL_INIT_WAIT_SEC = 12.0
+
+
+def hl_cli_session(sess: dict[str, Any]) -> str:
+    """Native CLI session id: cli_session, else derived from the transcript."""
+    cid = str(sess.get("cli_session") or "")
+    if cid:
+        return cid
+    path = Path(sess.get("transcript") or "")
+    if path.is_file():
+        sess["cli_session"] = path.stem
+        return path.stem
+    sess["cli_session"] = str(uuid.uuid4())
+    return sess["cli_session"]
+
+
+def hl_proc_file(sid: str) -> Path:
+    return HL_PROC_DIR / f"{sid}.pid"
+
+
+def _hl_pid(sid: str) -> int | None:
+    with _lock:
+        proc = _hl_procs.get(sid)
+    if proc is not None and proc.poll() is None:
+        return proc.pid
+    try:
+        pid = int(hl_proc_file(sid).read_text().strip())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def hl_running(sid: str) -> bool:
+    return _hl_pid(sid) is not None
+
+
+def _hl_signal(pid: int, sig: signal.Signals) -> None:
+    try:
+        os.killpg(pid, sig)
+    except OSError:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
+def hl_interrupt(sid: str, *, kill: bool = False) -> None:
+    """SIGINT ends the -p turn; SIGTERM is for tearing the session down."""
+    pid = _hl_pid(sid)
+    if pid is None:
+        return
+    _hl_signal(pid, signal.SIGTERM if kill else signal.SIGINT)
+    if kill:
+        _hl_signal(pid, signal.SIGKILL)
+
+
+def hl_choice(sess: dict[str, Any]) -> dict[str, Any] | None:
+    """Pending can_use_tool from the running claude -p query, if any."""
+    sid = str(sess.get("id") or "")
+    with _lock:
+        choice = _hl_choices.get(sid)
+    if not choice:
+        return None
+    if not hl_running(sid):
+        with _lock:
+            _hl_choices.pop(sid, None)
+            _hl_pending.pop(sid, None)
+        return None
+    return choice
+
+
+def _hl_cleanup(sid: str, proc: subprocess.Popen[bytes] | None = None) -> None:
+    with _lock:
+        if proc is None or _hl_procs.get(sid) is proc:
+            _hl_procs.pop(sid, None)
+        _hl_choices.pop(sid, None)
+        _hl_pending.pop(sid, None)
+    try:
+        hl_proc_file(sid).unlink()
+    except OSError:
+        pass
+
+
+def _hl_reap_orphan(sid: str) -> None:
+    """A previous wrap process may have left a -p child; SIGINT it before reuse."""
+    with _lock:
+        if sid in _hl_procs:
+            return
+    pid = _hl_pid(sid)
+    if pid is None:
+        try:
+            hl_proc_file(sid).unlink()
+        except OSError:
+            pass
+        return
+    log(f"hl orphan {sid} pid={pid}, interrupting")
+    _hl_signal(pid, signal.SIGINT)
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+        time.sleep(0.1)
+    else:
+        _hl_signal(pid, signal.SIGTERM)
+    try:
+        hl_proc_file(sid).unlink()
+    except OSError:
+        pass
+
+
+def _hl_write(proc: subprocess.Popen[bytes], obj: dict[str, Any]) -> None:
+    if proc.stdin is None:
+        raise RuntimeError("claude stdin gone")
+    line = json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n"
+    with _hl_stdin_lock:
+        proc.stdin.write(line)
+        proc.stdin.flush()
+
+
+def _hl_log_stderr(sid: str, proc: subprocess.Popen[bytes]) -> None:
+    if proc.stderr is None:
+        return
+    for raw in proc.stderr:
+        line = raw.decode("utf-8", "replace").rstrip()
+        if line:
+            log(f"hl {sid}: {line}")
+
+
+def claude_prompt(sess: dict[str, Any], text: str) -> None:
+    """One headless `claude -p` turn; follow-ups wait in wrap's send queue."""
+    sid = str(sess["id"])
+    _hl_reap_orphan(sid)
+    if hl_running(sid):
+        raise RuntimeError("claude query already running")
     cwd = Path(sess["cwd"])
-    oc.wait_idle(str(oc_id), cwd)
-    oc.prompt_async(
-        str(oc_id),
+    cid = hl_cli_session(sess)
+    fresh = bool(sess.get("hl_fresh", True))
+    binary = shutil_which("claude") or "claude"
+    args = [
+        binary,
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-prompts",
+        "host",
+    ]
+    if sess.get("model"):
+        args.extend(["--model", str(sess["model"])])
+    if sess.get("effort"):
+        args.extend(["--effort", str(sess["effort"])])
+    title = str(sess.get("title") or "").strip()
+    # Placeholder --name skips Claude's ai-title and overwrites the wrap tab.
+    if title and fresh and not tr.is_wrap_default_title(title):
+        args.extend(["--name", title[:40]])
+    if fresh:
+        args.extend(["--session-id", cid])
+        sess["hl_fresh"] = False
+    else:
+        args.extend(["--resume", cid])
+    env = dict(os.environ)
+    hook_bin = str(ROOT / "bin")
+    path = env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+    if hook_bin not in path.split(":"):
+        path = hook_bin + ":" + path
+    env["PATH"] = path
+    env["CLAUDE_CODE_DISABLE_MOUSE"] = "1"
+    env["CLAUDE_CODE_NO_FLICKER"] = "1"
+    env["IS_SANDBOX"] = os.environ.get("IS_SANDBOX", "1")
+    env["WRAP_SESSION_ID"] = sid
+    env["WRAP_URL"] = f"http://127.0.0.1:{PORT}"
+    HL_PROC_DIR.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(
+        args,
+        cwd=str(cwd),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+        bufsize=0,
+    )
+    with _lock:
+        _hl_procs[sid] = proc
+    hl_proc_file(sid).write_text(f"{proc.pid}\n")
+    threading.Thread(target=_hl_log_stderr, args=(sid, proc), daemon=True, name=f"wrap-hl-err-{sid}").start()
+    try:
+        _hl_run(sid, proc, text)
+    finally:
+        if proc.poll() is None:
+            hl_interrupt(sid)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                hl_interrupt(sid, kill=True)
+                proc.wait(timeout=2)
+        _hl_cleanup(sid, proc)
+        ensure_transcript(sess)
+        maybe_title_session(sess)
+
+
+def _hl_run(sid: str, proc: subprocess.Popen[bytes], text: str) -> None:
+    """Initialize the control protocol, send the user turn, handle can_use_tool."""
+    init_id = f"wrap-init-{secrets.token_hex(4)}"
+    try:
+        _hl_write(
+            proc,
+            {
+                "type": "control_request",
+                "request_id": init_id,
+                "request": {"subtype": "initialize", "hooks": None},
+            },
+        )
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"claude stdin gone: {exc}") from exc
+    sent_user = False
+    init_deadline = time.time() + HL_INIT_WAIT_SEC
+
+    def send_user() -> None:
+        nonlocal sent_user
+        if sent_user:
+            return
+        _hl_write(
+            proc,
+            {
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            },
+        )
+        sent_user = True
+
+    assert proc.stdout is not None
+    stdout = proc.stdout
+    while True:
+        if sent_user:
+            raw = stdout.readline()
+            if not raw:
+                break
+        else:
+            wait = max(0.05, min(1.0, init_deadline - time.time()))
+            ready, _, _ = select.select([stdout], [], [], wait)
+            if not ready:
+                if proc.poll() is not None:
+                    rest = stdout.read() or b""
+                    if rest:
+                        raw = rest.split(b"\n", 1)[0] + b"\n"
+                    else:
+                        break
+                elif time.time() >= init_deadline:
+                    log(f"claude {sid}: initialize timed out, sending prompt")
+                    try:
+                        send_user()
+                    except (OSError, RuntimeError) as exc:
+                        raise RuntimeError(f"claude stdin gone: {exc}") from exc
+                    continue
+                else:
+                    continue
+            else:
+                raw = stdout.readline()
+                if not raw:
+                    break
+        try:
+            ev = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        kind = str(ev.get("type") or "")
+        if kind == "control_response":
+            resp = ev.get("response") or {}
+            if not sent_user and str(resp.get("request_id") or "") == init_id:
+                try:
+                    send_user()
+                except (OSError, RuntimeError) as exc:
+                    raise RuntimeError(f"claude stdin gone: {exc}") from exc
+            continue
+        if kind in ("control_request", "sdk_control_request"):
+            _hl_on_control(sid, proc, ev)
+            continue
+        if kind == "system" and str(ev.get("subtype") or "") == "init" and not sent_user:
+            try:
+                send_user()
+            except (OSError, RuntimeError) as exc:
+                raise RuntimeError(f"claude stdin gone: {exc}") from exc
+            continue
+        if kind == "result":
+            break
+    if not sent_user:
+        raise RuntimeError("claude -p exited before accepting the prompt")
+    try:
+        if proc.stdin is not None:
+            with _hl_stdin_lock:
+                proc.stdin.close()
+    except OSError:
+        pass
+    proc.wait()
+    if proc.returncode not in (0, -signal.SIGINT, -signal.SIGTERM, 130, 143):
+        log(f"claude {sid}: exit {proc.returncode}")
+
+
+def _hl_on_control(sid: str, proc: subprocess.Popen[bytes], ev: dict[str, Any]) -> None:
+    req_id = str(ev.get("request_id") or "")
+    req = ev.get("request") if isinstance(ev.get("request"), dict) else {}
+    subtype = str(req.get("subtype") or "")
+    if subtype == "can_use_tool":
+        public = _hl_choice_public(req_id, req)
+        if not public:
+            _hl_control_reply(proc, req_id, {"behavior": "deny", "message": "empty prompt"})
+            return
+        with _lock:
+            _hl_choices[sid] = public
+            _hl_pending[sid] = {
+                "request_id": req_id,
+                "tool_name": str(req.get("tool_name") or ""),
+                "input": req.get("input") if isinstance(req.get("input"), dict) else {},
+            }
+        return
+    _hl_control_error(proc, req_id, f"unsupported control subtype {subtype or 'unknown'}")
+
+
+def _hl_control_reply(proc: subprocess.Popen[bytes], request_id: str, payload: dict[str, Any]) -> None:
+    _hl_write(
+        proc,
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": payload,
+            },
+        },
+    )
+
+
+def _hl_control_error(proc: subprocess.Popen[bytes], request_id: str, err: str) -> None:
+    try:
+        _hl_write(
+            proc,
+            {
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": request_id,
+                    "error": err,
+                },
+            },
+        )
+    except (OSError, RuntimeError):
+        pass
+
+
+def _hl_tool_prompt(tool: str, inp: dict[str, Any], req: dict[str, Any]) -> str:
+    title = str(req.get("title") or req.get("display_name") or "").strip()
+    if title:
+        return title[:200]
+    if tool == "Bash":
+        cmd = str(inp.get("command") or "").strip()
+        return (cmd or "Allow Bash?")[:200]
+    path = str(inp.get("file_path") or inp.get("path") or "").strip()
+    if path:
+        return f"{tool} {path}"[:200]
+    return f"Allow {tool}?"[:200]
+
+
+def _hl_choice_public(req_id: str, req: dict[str, Any]) -> dict[str, Any] | None:
+    """Map a can_use_tool request to the wrap choice shape."""
+    tool = str(req.get("tool_name") or "tool")
+    inp = req.get("input") if isinstance(req.get("input"), dict) else {}
+    cid = req_id or f"hl:{secrets.token_hex(4)}"
+    if tool in tr.ASK_TOOLS:
+        questions = []
+        for q in inp.get("questions") or []:
+            if not isinstance(q, dict):
+                continue
+            raw_opts = q.get("options") or []
+            opts = []
+            for i, o in enumerate(raw_opts):
+                if isinstance(o, dict):
+                    label = str(o.get("label") or o.get("id") or "").strip()
+                else:
+                    label = str(o).strip()
+                if label:
+                    opts.append({"label": label[:80], "key": str(i)})
+            if len(opts) < 2:
+                continue
+            questions.append(
+                {
+                    "prompt": str(q.get("question") or q.get("prompt") or "")[:200],
+                    "options": opts,
+                }
+            )
+        if not questions:
+            return None
+        return {
+            "id": f"hl:{cid}",
+            "kind": "question",
+            "drive": "",
+            "title": str(inp.get("title") or questions[0]["prompt"] or "Question")[:200],
+            "questions": questions,
+        }
+    prompt = _hl_tool_prompt(tool, inp, req)
+    return {
+        "id": f"hl:{cid}",
+        "kind": "permission",
+        "drive": "",
+        "title": prompt,
+        "questions": [
+            {
+                "prompt": prompt,
+                "options": [
+                    {"label": "Allow once", "key": "allow"},
+                    {"label": "Allow always", "key": "allow_always"},
+                    {"label": "Deny", "key": "deny"},
+                ],
+            }
+        ],
+    }
+
+
+def hl_reply_choice(sid: str, choice: dict[str, Any], picks: list[int]) -> None:
+    """Answer a pending can_use_tool by writing a control_response to stdin."""
+    with _lock:
+        proc = _hl_procs.get(sid)
+        pending = _hl_pending.get(sid) or {}
+    if proc is None or proc.poll() is not None:
+        raise RuntimeError("claude query is gone")
+    req_id = str(pending.get("request_id") or "")
+    if not req_id:
+        cid = str(choice.get("id") or "")
+        req_id = cid.split(":", 1)[1] if cid.startswith("hl:") else cid
+    tool = str(pending.get("tool_name") or "")
+    original = pending.get("input") if isinstance(pending.get("input"), dict) else {}
+    kind = str(choice.get("kind") or "")
+    if kind == "question" or tool in tr.ASK_TOOLS:
+        answers: dict[str, Any] = {}
+        for i, q in enumerate(choice.get("questions") or []):
+            opt = q.get("options") or []
+            label = ""
+            if i < len(picks) and 0 <= picks[i] < len(opt):
+                label = str(opt[picks[i]].get("label") or "")
+            prompt = str(q.get("prompt") or "")
+            src = (original.get("questions") or [{}])
+            key = str(src[i].get("question") or prompt) if i < len(src) and isinstance(src[i], dict) else prompt
+            if key:
+                answers[key] = label
+        payload = {
+            "behavior": "allow",
+            "updatedInput": {"questions": original.get("questions") or [], "answers": answers},
+        }
+    else:
+        key = "allow"
+        opt = ((choice.get("questions") or [{}])[0].get("options") or [])
+        try:
+            key = str(opt[picks[0]].get("key") or "allow")
+        except (IndexError, TypeError):
+            pass
+        if key == "deny":
+            payload = {"behavior": "deny", "message": "User denied this action"}
+        else:
+            payload = {"behavior": "allow", "updatedInput": original}
+            if key == "allow_always" and tool:
+                payload["updatedPermissions"] = [
+                    {
+                        "type": "addRules",
+                        "rules": [{"toolName": tool}],
+                        "behavior": "allow",
+                        "destination": "session",
+                    }
+                ]
+    try:
+        _hl_control_reply(proc, req_id, payload)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"claude stdin gone: {exc}") from exc
+    with _lock:
+        _hl_choices.pop(sid, None)
+        _hl_pending.pop(sid, None)
+
+
+def oc_send_text(sess: dict[str, Any], text: str) -> None:
+    oc_prompt(sess, text)
+
+
+def cursor_create_chat(cwd: Path) -> str:
+    binary = shutil_which("agent") or shutil_which("cursor-agent") or "agent"
+    try:
+        r = subprocess.run(
+            [binary, "create-chat"],
+            cwd=str(cwd),
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return str(uuid.uuid4())
+    blob = ((r.stdout or b"") + b"\n" + (r.stderr or b"")).decode("utf-8", "replace")
+    m = re.search(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        blob,
+        re.I,
+    )
+    return m.group(0) if m else str(uuid.uuid4())
+
+
+def _hl_spawn(
+    sid: str,
+    args: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    *,
+    stdin: Any = subprocess.PIPE,
+) -> subprocess.Popen[bytes]:
+    _hl_reap_orphan(sid)
+    if hl_running(sid):
+        raise RuntimeError("query already running")
+    HL_PROC_DIR.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(
+        args,
+        cwd=str(cwd),
+        stdin=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+        bufsize=0,
+    )
+    with _lock:
+        _hl_procs[sid] = proc
+    hl_proc_file(sid).write_text(f"{proc.pid}\n")
+    threading.Thread(target=_hl_log_stderr, args=(sid, proc), daemon=True, name=f"wrap-hl-err-{sid}").start()
+    return proc
+
+
+def _hl_env(sid: str) -> dict[str, str]:
+    env = dict(os.environ)
+    hook_bin = str(ROOT / "bin")
+    path = env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+    if hook_bin not in path.split(":"):
+        path = hook_bin + ":" + path
+    env["PATH"] = path
+    env["WRAP_SESSION_ID"] = sid
+    env["WRAP_URL"] = f"http://127.0.0.1:{PORT}"
+    return env
+
+
+def cursor_prompt(sess: dict[str, Any], text: str) -> None:
+    """One headless `agent -p` turn. Print mode has all tools; no tmux."""
+    sid = str(sess["id"])
+    cwd = Path(sess["cwd"])
+    cid = hl_cli_session(sess)
+    binary = shutil_which("agent") or shutil_which("cursor-agent") or "agent"
+    args = [
+        binary,
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--trust",
+        "--approve-mcps",
+        "--workspace",
+        str(cwd),
+        f"--resume={cid}",
+    ]
+    model = cursor_model_arg(
+        str(sess.get("model") or ""),
+        str(sess.get("effort") or ""),
+        bool(sess.get("fast")),
+    )
+    if model:
+        args.extend(["--model", model])
+    prompt = (text or "").strip()
+    if prompt.startswith("-"):
+        args.extend(["--", prompt])
+    else:
+        args.append(prompt)
+    env = _hl_env(sid)
+    env["TERM"] = "xterm-256color"
+    env["DISPLAY"] = os.environ.get("DISPLAY", ":0")
+    proc = _hl_spawn(sid, args, cwd, env)
+    try:
+        if proc.stdout is not None:
+            for _raw in proc.stdout:
+                pass
+        proc.wait()
+        if proc.returncode not in (0, -signal.SIGINT, -signal.SIGTERM, 130, 143):
+            log(f"cursor {sid}: exit {proc.returncode}")
+    finally:
+        if proc.poll() is None:
+            hl_interrupt(sid)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                hl_interrupt(sid, kill=True)
+                proc.wait(timeout=2)
+        _hl_cleanup(sid, proc)
+        ensure_transcript(sess)
+        maybe_title_session(sess)
+
+
+def oc_prompt(sess: dict[str, Any], text: str) -> None:
+    """One `opencode run --format json --auto` turn."""
+    sid = str(sess["id"])
+    cwd = Path(sess["cwd"])
+    oc_id = str(sess.get("oc_id") or "")
+    title = str(sess.get("title") or "")
+    prior = oc.list_messages(oc_id, cwd) if oc_id else []
+    wrap_id = f"wrap-{sid}"
+    user_msg = {
+        "id": f"u-{sid}-{len(prior)}",
+        "role": "user",
+        "text": text,
+        "parts": [{"type": "text", "text": text}],
+        "ts": "",
+    }
+    base = prior + [user_msg]
+    live_id = oc_id or wrap_id
+    oc.set_live_messages(live_id, base)
+    args = oc.run_argv(
         cwd,
         text,
+        session_id=oc_id,
         model=str(sess.get("model") or ""),
         effort=str(sess.get("effort") or ""),
+        title=title,
     )
+    # OpenCode reads all of stdin when it is not a TTY (`await Bun.stdin.text()`).
+    # An open PIPE without EOF blocks forever — never create a session, never emit JSON.
+    proc = _hl_spawn(sid, args, cwd, _hl_env(sid), stdin=subprocess.DEVNULL)
+    live_parts: list[dict[str, Any]] = []
+    got_id = oc_id
+
+    def publish() -> None:
+        key = got_id or wrap_id
+        assistant = None
+        if live_parts:
+            assistant = {
+                "id": f"live-{sid}",
+                "role": "assistant",
+                "text": "\n\n".join(
+                    p.get("text") or "" for p in live_parts if p.get("type") == "text"
+                ).strip(),
+                "parts": list(live_parts),
+                "ts": "",
+            }
+        oc.set_live_messages(key, base + ([assistant] if assistant else []))
+
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            eid = oc.event_session_id(ev)
+            if eid and eid != got_id:
+                if got_id != eid and live_id == wrap_id:
+                    oc.clear_live_messages(wrap_id)
+                got_id = eid
+                with _lock:
+                    sess["oc_id"] = eid
+                persist_state()
+            bits = oc.event_parts(ev)
+            if bits:
+                live_parts.extend(bits)
+            if eid or bits:
+                publish()
+        proc.wait()
+        if proc.returncode not in (0, -signal.SIGINT, -signal.SIGTERM, 130, 143):
+            log(f"opencode {sid}: exit {proc.returncode}")
+    finally:
+        if proc.poll() is None:
+            hl_interrupt(sid)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                hl_interrupt(sid, kill=True)
+                proc.wait(timeout=2)
+        _hl_cleanup(sid, proc)
+        oc.clear_live_messages(wrap_id)
+        if got_id:
+            oc.clear_live_messages(got_id)
+            with _lock:
+                sess["oc_id"] = got_id
+        maybe_title_session(sess)
 
 
 def hermes_send_text(sess: dict[str, Any], text: str) -> None:
@@ -1385,11 +2097,24 @@ def _drain_sends(sid: str) -> None:
             except KeyError:
                 return
             try:
-                if sess["agent"] == "opencode":
-                    oc_send_text(sess, text)
-                    continue
                 if sess["agent"] == "hermes":
                     hermes_send_text(sess, text)
+                    continue
+                if sess["agent"] in ("claude", "cursor", "opencode") and not sess.get("tmux"):
+                    with _lock:
+                        _sending.add(sid)
+                    try:
+                        if sess["agent"] == "opencode":
+                            oc_send_text(sess, text)
+                        elif sess["agent"] == "cursor":
+                            ensure_transcript(sess)
+                            cursor_prompt(sess, text)
+                        else:
+                            ensure_transcript(sess)
+                            claude_prompt(sess, text)
+                    finally:
+                        with _lock:
+                            _sending.discard(sid)
                     continue
                 name = sess.get("tmux")
                 if not name or not tmux_has(name):
@@ -1515,6 +2240,9 @@ def pick_transcript(sess: dict[str, Any]) -> Path | None:
             if cli_sid in p.name or cli_sid in p.parent.name:
                 if str(p) not in claimed and p.is_file():
                     return p
+    if agent in ("claude", "cursor") and not sess.get("tmux"):
+        # Headless transcripts are bound by cli_session; mtime would steal siblings.
+        return None
     candidates: list[tuple[float, Path]] = []
     for p in tr.list_transcripts(agent, cwd, CLAUDE_HOME, CURSOR_HOME):
         sp = str(p)
@@ -1542,30 +2270,6 @@ def ensure_transcript(sess: dict[str, Any]) -> Path | None:
         sess["transcript"] = str(found)
         persist_state()
     return found
-
-
-def wait_transcript(
-    agent: str,
-    cwd: Path,
-    before: dict[str, float],
-    timeout: float = 3.0,
-    *,
-    cli_session: str = "",
-) -> Path | None:
-    deadline = time.time() + timeout
-    dummy = {
-        "agent": agent,
-        "cwd": str(cwd),
-        "id": "",
-        "seen_transcripts": before,
-        "cli_session": cli_session,
-    }
-    while time.time() < deadline:
-        found = pick_transcript(dummy)
-        if found:
-            return found
-        time.sleep(0.25)
-    return None
 
 
 def snapshot_transcripts(agent: str, cwd: Path) -> dict[str, float]:
@@ -1609,7 +2313,7 @@ def catalog() -> dict[str, Any]:
     with _catalog_lock:
         cached = _catalog_cache["data"]
         if cached and now - float(_catalog_cache["at"]) < 120:
-            return cached
+            return _catalog_with_title(cached)
 
     cursor_models = [{"id": "", "label": "CLI default"}]
     cursor_models.extend(parse_labeled_models(run_lines(["agent", "models"])))
@@ -1659,7 +2363,21 @@ def catalog() -> dict[str, Any]:
     with _catalog_lock:
         _catalog_cache["at"] = now
         _catalog_cache["data"] = data
-    return data
+    return _catalog_with_title(data)
+
+
+def _catalog_with_title(data: dict[str, Any]) -> dict[str, Any]:
+    out = dict(data)
+    out["title"] = {
+        "fallback": title_fallback(),
+        "agents": [
+            {"id": "", "label": "Off"},
+            {"id": "claude", "label": "Claude"},
+            {"id": "cursor", "label": "Cursor"},
+            {"id": "opencode", "label": "OpenCode"},
+        ],
+    }
+    return out
 
 
 def list_projects() -> list[dict[str, Any]]:
@@ -1698,6 +2416,7 @@ def list_projects() -> list[dict[str, Any]]:
 
 def session_public(sess: dict[str, Any]) -> dict[str, Any]:
     apply_native_title(sess, persist=True)
+    maybe_title_session(sess)
     pane = ""
     cmd = ""
     screen: dict[str, Any] | None = None
@@ -1729,10 +2448,11 @@ def load_messages(sess: dict[str, Any]) -> list[dict[str, Any]]:
     if sess["agent"] == "console":
         return []
     if sess["agent"] == "opencode":
-        oc_id = sess.get("oc_id")
-        if not oc_id:
-            return []
-        return oc.list_messages(str(oc_id), sess.get("cwd") or "")
+        oc_id = str(sess.get("oc_id") or "")
+        cwd = sess.get("cwd") or ""
+        if oc_id:
+            return oc.list_messages(oc_id, cwd)
+        return oc.list_messages(f"wrap-{sess['id']}", cwd)
     if sess["agent"] == "hermes":
         hm_id = sess.get("hm_id")
         if not hm_id:
@@ -1747,6 +2467,7 @@ def load_messages(sess: dict[str, Any]) -> list[dict[str, Any]]:
 def fingerprint(sess: dict[str, Any]) -> str:
     if sess["agent"] == "opencode":
         oc_id = str(sess.get("oc_id") or "")
+        live_id = oc_id or f"wrap-{sess.get('id') or ''}"
         cwd = sess.get("cwd") or ""
         choice = session_choice(sess)
         cid = (choice or {}).get("id") or ""
@@ -1754,7 +2475,8 @@ def fingerprint(sess: dict[str, Any]) -> str:
         last = msgs[-1] if msgs else {}
         return (
             f"oc:{oc_id}:{len(msgs)}:{last.get('id')}:{len(last.get('text') or '')}:"
-            f"{int(oc.session_busy(oc_id, cwd))}:{cid}:{sess.get('title') or ''}:"
+            f"{int(hl_running(str(sess.get('id') or '')))}:{oc.live_generation(live_id)}:"
+            f"{cid}:{sess.get('title') or ''}:"
             f"q:{_queued_fp(sess['id'])}"
         )
     if sess["agent"] == "hermes":
@@ -1875,6 +2597,8 @@ def find_live_native(agent: str, native_id: str, cwd: Path) -> dict[str, Any] | 
         if agent == "opencode" and sess.get("oc_id"):
             return sess
         if agent == "hermes" and sess.get("hm_id"):
+            return sess
+        if agent in ("claude", "cursor") and not sess.get("tmux") and sess.get("cli_session"):
             return sess
         if sess.get("tmux") and tmux_has(str(sess["tmux"])):
             return sess
@@ -2079,9 +2803,12 @@ def search_history(query: str, limit: int = 40) -> list[dict[str, Any]]:
     for item in merged:
         if item.get("title") or str(item.get("agent") or "") != "claude":
             continue
-        named = (registry.get(str(item.get("native_id") or "")) or {}).get("name") or ""
-        if named and not tr.is_wrap_default_title(named):
-            item["title"] = named
+        named = registry.get(str(item.get("native_id") or "")) or {}
+        if str(named.get("nameSource") or "") != "user":
+            continue
+        title = str(named.get("name") or "").strip()
+        if title and not tr.is_wrap_default_title(title):
+            item["title"] = title
     hits: list[dict[str, Any]] = []
     rest: list[dict[str, Any]] = []
     for item in merged:
@@ -2262,7 +2989,7 @@ def open_session(
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     if agent == "opencode":
-        oc_id = resume_id or oc.create_session(cwd, user_title)
+        oc_id = resume_id
         sess = {
             "id": sid,
             "agent": "opencode",
@@ -2281,6 +3008,8 @@ def open_session(
         with _lock:
             SESSIONS[sid] = sess
         persist_state()
+        if prompt:
+            enqueue_send(sid, prompt)
         return sess
 
     if agent == "hermes":
@@ -2308,6 +3037,8 @@ def open_session(
         with _lock:
             SESSIONS[sid] = sess
         persist_state()
+        if prompt:
+            enqueue_send(sid, prompt)
         return sess
 
     if agent == "console":
@@ -2332,53 +3063,73 @@ def open_session(
         persist_state()
         return sess
 
-    if not tmux_ok():
-        raise RuntimeError("tmux is not installed — rebuild the agents image")
+    if agent == "claude":
+        cli_session = resume_id if resume_id else str(uuid.uuid4())
+        transcript = None
+        if resume_id:
+            for p in tr.list_transcripts(agent, cwd, CLAUDE_HOME, CURSOR_HOME):
+                if p.stem == resume_id and p.is_file():
+                    transcript = str(p)
+                    break
+        sess = {
+            "id": sid,
+            "agent": "claude",
+            "cwd": str(cwd),
+            "tmux": None,
+            "oc_id": None,
+            "hm_id": None,
+            "transcript": transcript,
+            "seen_transcripts": snapshot_transcripts(agent, cwd),
+            "title": title,
+            "model": model,
+            "effort": effort,
+            "fast": fast,
+            "created": created,
+            "cli_session": cli_session,
+            "hl_fresh": not bool(resume_id),
+            "boot_prompt": prompt if prompt else "",
+            "title_source": "user" if user_title else "wrap",
+        }
+        with _lock:
+            SESSIONS[sid] = sess
+        persist_state()
+        if prompt:
+            enqueue_send(sid, prompt)
+        return sess
 
-    before = snapshot_transcripts(agent, cwd)
-    cli_session = resume_id if resume_id else (str(uuid.uuid4()) if agent == "claude" else "")
-    name = start_tmux(
-        sid,
-        agent,
-        cwd,
-        model=model,
-        effort=effort,
-        fast=fast,
-        title=user_title,
-        cli_session=cli_session if not resume_id else "",
-        resume_id=resume_id,
-        prompt=prompt if agent == "cursor" else "",
-    )
     if agent == "cursor":
-        cursor_wait_boot(name)
-    path = wait_transcript(
-        agent,
-        cwd,
-        before,
-        timeout=4.0,
-        cli_session=cli_session,
-    )
-    sess = {
-        "id": sid,
-        "agent": agent,
-        "cwd": str(cwd),
-        "tmux": name,
-        "transcript": str(path) if path else None,
-        "seen_transcripts": before,
-        "cli_session": cli_session,
-        "oc_id": None,
-        "hm_id": None,
-        "title": title,
-        "model": model,
-        "effort": effort,
-        "fast": fast,
-        "created": created,
-        "boot_prompt": prompt if agent == "cursor" else "",
-    }
-    with _lock:
-        SESSIONS[sid] = sess
-    persist_state()
-    return sess
+        cli_session = resume_id if resume_id else cursor_create_chat(cwd)
+        transcript = None
+        if resume_id:
+            path = history_transcript("cursor", cwd, resume_id)
+            if path:
+                transcript = str(path)
+        sess = {
+            "id": sid,
+            "agent": "cursor",
+            "cwd": str(cwd),
+            "tmux": None,
+            "oc_id": None,
+            "hm_id": None,
+            "transcript": transcript,
+            "seen_transcripts": snapshot_transcripts(agent, cwd),
+            "title": title,
+            "model": model,
+            "effort": effort,
+            "fast": fast,
+            "created": created,
+            "cli_session": cli_session,
+            "hl_fresh": not bool(transcript),
+            "title_source": "user" if user_title else "wrap",
+        }
+        with _lock:
+            SESSIONS[sid] = sess
+        persist_state()
+        if prompt:
+            enqueue_send(sid, prompt)
+        return sess
+
+    raise RuntimeError(f"tmux is only for console sessions, not {agent}")
 
 
 def get_session(sid: str) -> dict[str, Any]:
@@ -2408,6 +3159,7 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
             continue
         if apply_native_title(sess, persist=False, registry=registry):
             changed = True
+        maybe_title_session(sess)
         live = bool(sess.get("tmux") and tmux_has(sess["tmux"])) or http_live(sess)
         if not live:
             if sess.get("agent") == "console":
@@ -2443,16 +3195,19 @@ def list_sessions(cwd: Path | None = None, agent: str | None = None) -> list[dic
 def kill_session(sid: str) -> None:
     stop_send_queue(sid)
     sess = get_session(sid)
-    if sess.get("agent") == "opencode" and sess.get("oc_id"):
-        try:
-            oc.abort(str(sess["oc_id"]), Path(sess["cwd"]))
-        except RuntimeError:
-            pass
     if sess.get("agent") == "hermes" and sess.get("hm_id"):
         try:
             hm.abort(str(sess["hm_id"]))
         except RuntimeError:
             pass
+    if sess.get("agent") in ("claude", "cursor", "opencode") and not sess.get("tmux"):
+        hl_interrupt(sid, kill=True)
+        with _lock:
+            _hl_choices.pop(sid, None)
+            _hl_pending.pop(sid, None)
+        oc_id = str(sess.get("oc_id") or "")
+        if oc_id:
+            oc.clear_live_messages(oc_id)
     if sess.get("tmux"):
         tmux("kill-session", "-t", sess["tmux"])
     with _lock:
@@ -2516,7 +3271,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "tmux": tmux_ok(),
                     "opencode": shutil_which("opencode") is not None,
-                    "opencode_serve": oc.health(),
+                    "opencode_serve": False,
                     "hermes": hermes_on() and hm.health(),
                     "hermes_enabled": hermes_on(),
                     "host_projects": str(HOST_PROJECTS),
@@ -2657,6 +3412,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 st, raw, ct = json_bytes({"ok": True, "pinned": keys})
                 return self._send(st, raw, ct)
+            if path == "/api/settings":
+                fb = set_title_fallback(data.get("title_fallback") if isinstance(data.get("title_fallback"), dict) else data)
+                st, raw, ct = json_bytes({"ok": True, "title_fallback": fb})
+                return self._send(st, raw, ct)
             if path == "/api/sessions":
                 attach = str(data.get("id") or "")
                 if attach:
@@ -2710,10 +3469,10 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/sessions/([^/]+)/interrupt", path)
             if m:
                 sess = get_session(m.group(1))
-                if sess["agent"] == "opencode" and sess.get("oc_id"):
-                    oc.abort(str(sess["oc_id"]), Path(sess["cwd"]))
-                elif sess["agent"] == "hermes" and sess.get("hm_id"):
+                if sess["agent"] == "hermes" and sess.get("hm_id"):
                     hm.abort(str(sess["hm_id"]))
+                elif sess["agent"] in ("claude", "cursor", "opencode") and not sess.get("tmux"):
+                    hl_interrupt(m.group(1))
                 elif sess.get("tmux"):
                     tmux_send_keys(sess["tmux"], ["Escape"])
                 else:
@@ -2742,8 +3501,8 @@ class Handler(BaseHTTPRequestHandler):
                     if n < 0 or n >= len(opts):
                         raise ValueError("option out of range")
                     idxs.append(n)
-                if sess["agent"] == "opencode":
-                    apply_oc_choice(sess, choice, idxs)
+                if sess["agent"] == "claude" and not sess.get("tmux"):
+                    hl_reply_choice(m.group(1), choice, idxs)
                 else:
                     if not sess.get("tmux"):
                         raise RuntimeError("no tmux pane for this session")
@@ -2807,14 +3566,13 @@ class Handler(BaseHTTPRequestHandler):
         text = str(data.get("text") or "")
         if not text.strip():
             raise ValueError("empty message")
-        if sess["agent"] == "opencode":
-            if not sess.get("oc_id"):
-                raise RuntimeError("no opencode session")
-        elif sess["agent"] == "hermes":
+        if sess["agent"] == "hermes":
             if not sess.get("hm_id"):
                 raise RuntimeError("no hermes session")
         elif sess["agent"] == "console":
             raise RuntimeError("console has no chat")
+        elif sess["agent"] in ("claude", "cursor", "opencode") and not sess.get("tmux"):
+            pass
         elif not sess.get("tmux") or not tmux_has(sess["tmux"]):
             raise RuntimeError("tmux session is gone")
         enqueue_send(sid, text)
@@ -2886,7 +3644,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(b"event: gone\ndata: {}\n\n")
                     self.wfile.flush()
                     return
-                if sess.get("agent") in ("opencode", "hermes"):
+                if sess.get("agent") in ("opencode", "hermes") or (
+                    sess.get("agent") in ("claude", "cursor") and not sess.get("tmux")
+                ):
                     payload = session_public(sess)
                     fp = json.dumps(
                         {
@@ -2914,10 +3674,10 @@ class Handler(BaseHTTPRequestHandler):
                         chunk = f"event: sync\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
                         self.wfile.write(chunk.encode("utf-8"))
                         self.wfile.flush()
-                    if sess.get("agent") == "opencode":
-                        oc.wait(str(sess.get("oc_id") or ""), timeout=0.35 if payload.get("busy") else 1.2)
-                    else:
+                    if sess.get("agent") == "hermes":
                         hm.wait(str(sess.get("hm_id") or ""), timeout=0.35 if payload.get("busy") else 1.2)
+                    else:
+                        time.sleep(0.4 if payload.get("busy") else 1.2)
                     continue
                 fp = fingerprint(sess)
                 pane = tmux_capture(sess["tmux"]) if sess.get("tmux") else ""
@@ -2999,8 +3759,6 @@ def main() -> None:
     discover_tmux()
     sweep_legacy_consoles()
     install_cmux_shim()
-    if shutil_which("opencode"):
-        threading.Thread(target=_oc_warmup, daemon=True, name="wrap-oc-warmup").start()
     threading.Thread(target=_paste_sweeper, daemon=True, name="wrap-pastes").start()
     try:
         sweep_pastes(force=True)

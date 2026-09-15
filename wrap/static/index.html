@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark" />
   <title>wrap — native sessions</title>
   <link rel="stylesheet" href="/static/vendor/xterm.css?v=42" />
-  <link rel="stylesheet" href="/static/style.css?v=44" />
+  <link rel="stylesheet" href="/static/style.css?v=47" />
 </head>
 <body>
   <div id="scrim" hidden></div>
@@ -110,7 +110,7 @@
       <header id="settings-head">
         <div>
           <strong>Defaults</strong>
-          <p class="lead">Per agent, used for new chats and when resuming a closed session. Stored in this browser.</p>
+          <p class="lead">Per agent, used for new chats and when resuming a closed session. Stored in this browser. Session titles for Cursor / OpenCode / Hermes use the fallback below (saved on the server).</p>
         </div>
         <button type="button" id="btn-settings-close" class="ghost tiny">Close</button>
       </header>
@@ -125,7 +125,6 @@
           <button type="button" id="btn-pane" class="ghost" hidden>TUI</button>
           <button type="button" id="btn-int" class="ghost" hidden>Interrupt</button>
           <button type="button" id="btn-clear" class="ghost" hidden title="Stop this session and start a new one with the same project, agent, and model">Clear</button>
-          <button type="button" id="btn-stop" class="ghost danger" hidden>Stop</button>
         </div>
         <button type="submit" id="btn-send" disabled>Send</button>
       </div>
@@ -133,6 +132,6 @@
   </main>
   <script src="/static/vendor/xterm.min.js?v=42"></script>
   <script src="/static/vendor/addon-fit.min.js?v=42"></script>
-  <script src="/static/app.js?v=46"></script>
+  <script src="/static/app.js?v=51"></script>
 </body>
 </html>

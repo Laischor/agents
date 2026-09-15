@@ -46,8 +46,6 @@ fi
 export WRAP_HOST="$HOST"
 export WRAP_PORT="$PORT"
 export WRAP_ROOT
-# Leave default OpenCode serve on :4096.
-export WRAP_OPENCODE_PORT="${WRAP_OPENCODE_PORT:-4097}"
 export WRAP_HERMES_URL="${WRAP_HERMES_URL:-http://hermes:8642}"
 export PYTHONUNBUFFERED=1
 
