@@ -79,23 +79,23 @@ The launcher starts the container if needed and sets the working directory 1:1 t
 
 | Agent | How wrap talks to it | Extra model calls |
 |---|---|---|
-| Claude Code | tmux session + `~/.claude/projects/…/*.jsonl` | none |
-| Cursor CLI | tmux session + `~/.cursor/projects/…/agent-transcripts/` | none |
+| Claude Code | `claude -p` + `~/.claude/projects/…/*.jsonl` | none |
+| Cursor CLI | `agent -p` + `~/.cursor/projects/…/agent-transcripts/` | none |
 | OpenCode | `opencode serve` HTTP API (same backend as the TUI) | none |
 | Hermes | Gateway API on `:8642` (only when `HERMES=1`) | none |
 
 The container starts wrap on `0.0.0.0:3000` (host: `http://127.0.0.1:3000`). Pick a project, choose model/effort, then **New** — several sessions per project and agent can run in parallel. A message is pasted into that session's live TUI (or posted to OpenCode / the Hermes gateway). Chat bubbles come from the CLI's own transcript, not a second agent.
 
-**Console** is a session type of its own (New → Console): a project `bash` in tmux, listed in the sidebar next to chat sessions. Stop removes it; there is no console history. **Diff** appears as a hover button at the top-right of Chat when the project working tree is dirty. Pin a session with the thumbtack in the sidebar — pinned sessions stay at the top of the list after wrap restarts, even when they are closed.
+**Console** is a session type of its own (New → Console): a project `bash` in a PTY, listed in the sidebar next to chat sessions. Stop removes it; there is no console history. **Diff** appears as a hover button at the top-right of Chat when the project working tree is dirty. Pin a session with the thumbtack in the sidebar — pinned sessions stay at the top of the list after wrap restarts, even when they are closed.
 
 ```bash
 open http://127.0.0.1:3000
 agents wrap                 # print URL if already up
 ```
 
-TUI permission prompts show **Yes** / **No** in the chat when they appear (or open the **TUI** pane). **Stop** kills that tmux process only. OpenCode and Hermes sessions stay in their own history (Stop does not delete them).
+Permission prompts show **Yes** / **No** in the chat when they appear. **Stop** ends that wrap session (and the console PTY). OpenCode and Hermes sessions stay in their own history (Stop does not delete them).
 
-Set `AGENTS_WRAP_SERVE=0` in `.env` to skip auto-start. Recreate `agents` from the **host** after this change (`./start.sh`) so the image has `tmux` and the port mapping.
+Set `AGENTS_WRAP_SERVE=0` in `.env` to skip auto-start. Recreate `agents` from the **host** after this change (`./start.sh`) so the image has the port mapping.
 
 ## GitHub CLI (`gh`)
 

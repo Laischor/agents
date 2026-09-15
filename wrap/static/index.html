@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark" />
   <title>wrap — native sessions</title>
   <link rel="stylesheet" href="/static/vendor/xterm.css?v=42" />
-  <link rel="stylesheet" href="/static/style.css?v=47" />
+  <link rel="stylesheet" href="/static/style.css?v=48" />
 </head>
 <body>
   <div id="scrim" hidden></div>
@@ -79,9 +79,6 @@
     <div id="chat">
       <button type="button" id="btn-diff" class="ghost tiny" hidden>Diff</button>
       <section id="log" class="log"></section>
-      <div id="tui" hidden>
-        <div id="tui-term" class="term"></div>
-      </div>
       <div id="diff" hidden>
         <header id="diff-head">
           <div>
@@ -122,7 +119,6 @@
       <textarea id="input" rows="2" placeholder="Message the native CLI…" disabled></textarea>
       <div class="row">
         <div class="actions">
-          <button type="button" id="btn-pane" class="ghost" hidden>TUI</button>
           <button type="button" id="btn-int" class="ghost" hidden>Interrupt</button>
           <button type="button" id="btn-clear" class="ghost" hidden title="Stop this session and start a new one with the same project, agent, and model">Clear</button>
         </div>
@@ -132,6 +128,6 @@
   </main>
   <script src="/static/vendor/xterm.min.js?v=42"></script>
   <script src="/static/vendor/addon-fit.min.js?v=42"></script>
-  <script src="/static/app.js?v=51"></script>
+  <script src="/static/app.js?v=53"></script>
 </body>
 </html>

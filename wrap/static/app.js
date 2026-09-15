@@ -39,7 +39,6 @@ const state = {
   session: null,
   draft: false,
   es: null,
-  paneOpen: false,
   diffOpen: false,
   attachments: [],
   pingSid: "",
@@ -373,11 +372,10 @@ const TERM_THEME = {
   brightWhite: "#f4f0e0",
 };
 
-let tuiX = null;
 let shX = null;
 let diffTimer = 0;
-const rawBuf = { tui: "", sh: "" };
-const rawTimer = { tui: 0, sh: 0 };
+let rawBuf = "";
+let rawTimer = 0;
 
 function hasXterm() {
   return (
@@ -424,102 +422,68 @@ function isTextField(el) {
   return Boolean(el.isContentEditable);
 }
 
-function makeTerm(el, kind) {
+function makeTerm(el) {
   const term = new Terminal({
     cursorBlink: true,
     fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace',
     fontSize: 13,
     lineHeight: 1.2,
     theme: TERM_THEME,
-    scrollback: 0,
+    scrollback: 5000,
     allowProposedApi: false,
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(el);
-  term.onData((data) => queueRaw(kind, data));
-  const x = { term, fit, el, gen: 0 };
+  term.onData((data) => queueRaw(data));
+  const x = { term, fit, el };
   const ro = new ResizeObserver(() => {
     if (el.offsetParent === null && el.getClientRects().length === 0) return;
-    fitResize(kind);
+    fitResize();
   });
   ro.observe(el);
   return x;
-}
-
-function ensureTuiTerm() {
-  if (tuiX || !hasXterm()) return tuiX;
-  const el = $("tui-term");
-  if (!el) return null;
-  tuiX = makeTerm(el, "tui");
-  return tuiX;
 }
 
 function ensureShTerm() {
   if (shX || !hasXterm()) return shX;
   const el = $("console-term");
   if (!el) return null;
-  shX = makeTerm(el, "sh");
+  shX = makeTerm(el);
   return shX;
 }
 
-function paintScreen(x, screen) {
-  if (!x?.term || !screen) return;
-  x.gen += 1;
-  const gen = x.gen;
-  const cols = Math.max(2, Number(screen.cols) || x.term.cols);
-  const rows = Math.max(1, Number(screen.rows) || x.term.rows);
-  if (x.term.cols !== cols || x.term.rows !== rows) {
-    try {
-      x.term.resize(cols, rows);
-    } catch (_) {
-      /* ignore */
-    }
-  }
-  let lines = String(screen.screen || "").replace(/\r/g, "").split("\n");
-  if (lines.length && lines[lines.length - 1] === "") lines.pop();
-  if (lines.length > rows) lines = lines.slice(0, rows);
-  const text = lines.join("\r\n");
-  x.term.reset();
-  x.term.write("\x1b[H" + text, () => {
-    if (gen !== x.gen) return;
-    const cx = Math.min(cols, Math.max(0, Number(screen.cx) || 0) + 1);
-    const cy = Math.min(rows, Math.max(0, Number(screen.cy) || 0) + 1);
-    x.term.write(`\x1b[${cy};${cx}H`);
-  });
+function writeTerm(b64) {
+  if (!shX?.term || !b64) return;
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  shX.term.write(bytes);
 }
 
-function queueRaw(kind, data) {
-  rawBuf[kind] += data;
-  if (!rawTimer[kind]) rawTimer[kind] = setTimeout(() => flushRaw(kind), 16);
+function queueRaw(data) {
+  rawBuf += data;
+  if (!rawTimer) rawTimer = setTimeout(flushRaw, 16);
 }
 
-async function flushRaw(kind) {
-  rawTimer[kind] = 0;
-  const data = rawBuf[kind];
-  rawBuf[kind] = "";
+async function flushRaw() {
+  rawTimer = 0;
+  const data = rawBuf;
+  rawBuf = "";
   if (!data) return;
   try {
-    if (kind === "tui") {
-      if (!state.session?.id || !state.session?.tmux) return;
-      await api(`/api/sessions/${state.session.id}/input`, {
-        method: "POST",
-        body: JSON.stringify({ data }),
-      });
-    } else {
-      if (!isConsole() || !state.session?.id) return;
-      await api(`/api/sessions/${state.session.id}/input`, {
-        method: "POST",
-        body: JSON.stringify({ data }),
-      });
-    }
+    if (!isConsole() || !state.session?.id) return;
+    await api(`/api/sessions/${state.session.id}/input`, {
+      method: "POST",
+      body: JSON.stringify({ data }),
+    });
   } catch (err) {
     setStatus(err.message || String(err));
   }
 }
 
-async function fitResize(kind) {
-  const x = kind === "tui" ? tuiX : shX;
+async function fitResize() {
+  const x = shX;
   if (!x?.fit) return;
   if (x.el && (x.el.offsetWidth < 40 || x.el.offsetHeight < 40)) return;
   try {
@@ -531,21 +495,11 @@ async function fitResize(kind) {
   const rows = x.term.rows;
   if (!cols || !rows) return;
   try {
-    if (kind === "tui") {
-      if (!state.session?.id || !state.session?.tmux) return;
-      const out = await api(`/api/sessions/${state.session.id}/resize`, {
-        method: "POST",
-        body: JSON.stringify({ cols, rows }),
-      });
-      if (out.screen) paintScreen(tuiX, out.screen);
-    } else {
-      if (!isConsole() || !state.session?.id) return;
-      const out = await api(`/api/sessions/${state.session.id}/resize`, {
-        method: "POST",
-        body: JSON.stringify({ cols, rows }),
-      });
-      if (out.screen) paintScreen(shX, out.screen);
-    }
+    if (!isConsole() || !state.session?.id) return;
+    await api(`/api/sessions/${state.session.id}/resize`, {
+      method: "POST",
+      body: JSON.stringify({ cols, rows }),
+    });
   } catch (err) {
     setStatus(err.message || String(err));
   }
@@ -557,8 +511,7 @@ function showConsoleTerm(sess) {
     return;
   }
   ensureShTerm();
-  if (sess?.screen) paintScreen(shX, sess.screen);
-  requestAnimationFrame(() => fitResize("sh"));
+  requestAnimationFrame(() => fitResize());
   shX?.term?.focus();
 }
 
@@ -682,7 +635,7 @@ async function loadDiff() {
     const dirtyTotal = Number(state.diff?.dirty_total);
     const dirty = (Number.isFinite(dirtyTotal) ? dirtyTotal : n) > 0 || nestedN > 0;
     if (btn) {
-      btn.hidden = !dirty || state.diffOpen || state.paneOpen;
+      btn.hidden = !dirty || state.diffOpen;
       btn.textContent = n > 1 ? `Diff · ${n}` : "Diff";
     }
     if (state.diffOpen) renderGitDiff();
@@ -696,7 +649,6 @@ async function loadDiff() {
 function setDiffOpen(on) {
   state.diffOpen = Boolean(on) && !isConsole();
   if (state.diffOpen) {
-    state.paneOpen = false;
     renderGitDiff();
   }
   applyChrome();
@@ -979,6 +931,7 @@ function listedAgents() {
     add("opencode", "OpenCode");
   }
   for (const s of [...(state.sessions || []), ...(state.history || [])]) {
+    if (s.agent === "console") continue;
     add(s.agent);
   }
   return [...seen.values()];
@@ -989,6 +942,7 @@ function filterActive() {
 }
 
 function matchesAgent(s) {
+  if ((s?.agent || "") === "console") return true;
   if (!filterActive()) return true;
   return state.agentFilter.has(s.agent || "");
 }
@@ -1162,7 +1116,7 @@ function applyChrome() {
   const viewing = Boolean(sess);
   const draft = state.draft && !viewing;
   $("session-bar").hidden = !draft;
-  $("input").disabled = !canCompose() || state.paneOpen || state.diffOpen;
+  $("input").disabled = !canCompose() || state.diffOpen;
   $("input").placeholder = draft
     ? "Send a message or paste a screenshot to start…"
     : viewing && !running
@@ -1170,24 +1124,14 @@ function applyChrome() {
       : sess?.agent === "hermes"
         ? "Message Hermes… paste a screenshot"
         : "Message the native CLI… paste a screenshot";
-  $("btn-send").disabled = !canCompose() || state.paneOpen || state.diffOpen;
-  $("input").disabled = !canCompose() || state.paneOpen || state.diffOpen;
+  $("btn-send").disabled = !canCompose() || state.diffOpen;
+  $("input").disabled = !canCompose() || state.diffOpen;
   $("btn-int").hidden = !running || isConsole(sess);
   $("btn-int").title = `Interrupt (${modSym()}+.)`;
   $("btn-clear").hidden = !(viewing && sess?.cwd && sess?.agent && sess.agent !== "console");
-  $("btn-pane").hidden = !(running && sess?.tmux) || isConsole(sess);
-  $("btn-pane").title = `TUI (${modSym()}+U)`;
-  $("btn-pane").classList.toggle("on", Boolean(state.paneOpen && running && !isConsole(sess) && !state.diffOpen));
   $("btn-diff").title = `Diff (${modSym()}+J)`;
   $("search").title = `Filter sidebar. ${modSym()}K opens Spotlight.`;
   $("btn-new").title = "New session";
-  const showTui = running && sess?.tmux && state.paneOpen && !isConsole(sess) && !state.diffOpen;
-  if (showTui) {
-    $("tui").hidden = false;
-    ensureTuiTerm();
-  } else {
-    $("tui").hidden = true;
-  }
   $("chat").hidden = isConsole(sess);
   $("console").hidden = !isConsole(sess);
   $("diff").hidden = !state.diffOpen || isConsole(sess);
@@ -1195,7 +1139,7 @@ function applyChrome() {
   const nFiles = (state.diff?.ok && state.diff.files) ? state.diff.files.length : 0;
   const dirtyTotal = Number(state.diff?.dirty_total);
   const nDiff = Number.isFinite(dirtyTotal) ? dirtyTotal : nFiles;
-  $("btn-diff").hidden = isConsole(sess) || state.diffOpen || state.paneOpen || nDiff === 0;
+  $("btn-diff").hidden = isConsole(sess) || state.diffOpen || nDiff === 0;
   if (viewing) {
     if (sess.agent && sess.agent !== "console") $("agent").value = sess.agent;
     fillProjects();
@@ -1204,8 +1148,6 @@ function applyChrome() {
     fillProjects();
   } else {
     $("log").innerHTML = `<div class="empty">New session — then choose project and agent</div>`;
-    state.paneOpen = false;
-    $("tui").hidden = true;
   }
   const title = $("mobile-title");
   if (state.settings) title.textContent = "Settings";
@@ -1223,7 +1165,6 @@ function applyChrome() {
     $("console").hidden = true;
     $("composer").hidden = true;
     $("status").hidden = true;
-    $("tui").hidden = true;
     $("diff").hidden = true;
   } else if ($("status").textContent) {
     $("status").hidden = false;
@@ -1239,7 +1180,6 @@ function openDraft(opts = {}) {
   state.settings = false;
   state.session = null;
   state.draft = true;
-  state.paneOpen = false;
   state.diffOpen = false;
   if (opts.agent && opts.agent !== "console") state.agent = opts.agent;
   else if (state.agent === "console") state.agent = "claude";
@@ -1264,7 +1204,6 @@ function clearMain() {
   state.settings = false;
   state.session = null;
   state.draft = false;
-  state.paneOpen = false;
   state.diffOpen = false;
   clearAttachments();
   applyChrome();
@@ -1608,7 +1547,6 @@ async function loadHealth() {
   try {
     const h = await api("/api/health");
     const bits = [
-      h.tmux ? "tmux ok" : "tmux missing",
       h.opencode ? "opencode ok" : "no opencode",
     ];
     if (h.hermes_enabled) {
@@ -1651,18 +1589,10 @@ function renderSession(sess) {
   setStatus("");
   seedQueued(sess);
   if (isConsole(sess)) {
-    state.paneOpen = false;
     state.diffOpen = false;
     showConsoleTerm(sess);
   } else {
     renderMessages(mergeMessages(sess.messages || []));
-    if (sess.tmux && sess.screen && state.paneOpen) {
-      ensureTuiTerm();
-      paintScreen(tuiX, sess.screen);
-      requestAnimationFrame(() => fitResize("tui"));
-    } else if (!sess.tmux) {
-      setPaneOpen(false);
-    }
   }
   applyChrome();
   renderSessions();
@@ -1909,6 +1839,14 @@ function connectStream(id) {
     state.es.close();
     state.es = null;
   }
+  if (isConsole()) {
+    ensureShTerm();
+    try {
+      shX.term.reset();
+    } catch (_) {
+      /* ignore */
+    }
+  }
   const es = new EventSource(`/api/sessions/${id}/stream`);
   state.es = es;
   es.addEventListener("sync", (ev) => {
@@ -1918,26 +1856,9 @@ function connectStream(id) {
       /* ignore */
     }
   });
-  es.addEventListener("pane", (ev) => {
+  es.addEventListener("term", (ev) => {
     try {
-      const data = JSON.parse(ev.data);
-      if (state.session) {
-        const wasBusy = state.session.busy;
-        const wasChoice = JSON.stringify(state.session.choice || null);
-        state.session.busy = data.busy;
-        state.session.pane = data.pane;
-        if (data.screen) state.session.screen = data.screen;
-        if ("subagents" in data) state.session.subagents = data.subagents;
-        if ("choice" in data) state.session.choice = data.choice;
-        if (wasBusy !== data.busy || wasChoice !== JSON.stringify(data.choice || null)) {
-          if (!isConsole()) renderMessages(mergeMessages(state.session.messages || []));
-        }
-      }
-      if (data.screen) {
-        if (isConsole()) paintScreen(shX, data.screen);
-        else if (state.paneOpen) paintScreen(tuiX, data.screen);
-      }
-      renderSessions();
+      writeTerm(JSON.parse(ev.data).b);
     } catch (_) {
       /* ignore */
     }
@@ -2049,7 +1970,6 @@ async function clearSession() {
       state.es = null;
     }
     state.session = null;
-    state.paneOpen = false;
     clearAttachments();
     state.agent = cfg.agent;
     persistCwd(cfg.cwd);
@@ -2064,7 +1984,7 @@ async function clearSession() {
     $("fast").checked = Boolean(cfg.fast);
     const next = await spawnSession(cfg);
     if (next) {
-      if (!state.paneOpen) $("input").focus();
+      $("input").focus();
     } else {
       state.draft = true;
       applyChrome();
@@ -2328,40 +2248,10 @@ async function sendMessage(ev) {
     }
   } finally {
     state.sending = false;
-    $("btn-send").disabled = !canCompose() || state.paneOpen;
-    $("input").disabled = !canCompose() || state.paneOpen;
-    if (!state.paneOpen) $("input").focus();
+    $("btn-send").disabled = !canCompose();
+    $("input").disabled = !canCompose();
+    $("input").focus();
   }
-}
-
-async function keys(list) {
-  if (!state.session || !list.length) return;
-  try {
-    await api(`/api/sessions/${state.session.id}/keys`, {
-      method: "POST",
-      body: JSON.stringify({ keys: list }),
-    });
-  } catch (err) {
-    setStatus(err.message || String(err));
-  }
-}
-
-function setPaneOpen(on) {
-  state.paneOpen = Boolean(on) && Boolean(state.session?.tmux) && !isConsole();
-  if (state.paneOpen) state.diffOpen = false;
-  applyChrome();
-  if (state.paneOpen) {
-    if (state.session?.screen) paintScreen(tuiX, state.session.screen);
-    requestAnimationFrame(() => {
-      fitResize("tui");
-      tuiX?.term?.focus();
-    });
-  }
-}
-
-function toggleTui() {
-  if (!state.session?.live || !state.session?.tmux || isConsole() || state.settings) return;
-  setPaneOpen(!state.paneOpen);
 }
 
 function toggleDiff() {
@@ -2560,7 +2450,7 @@ function closeSpotlight() {
   cmdk.open = false;
   cmdk.pick = null;
   $("cmdk").hidden = true;
-  if (state.paneOpen) tuiX?.term?.focus();
+  if (isConsole()) shX?.term?.focus();
   else if (!state.diffOpen && !$("input").disabled) $("input").focus();
 }
 
@@ -2607,74 +2497,6 @@ function cmdkBack() {
   cmdk.i = 0;
   $("cmdk-input").value = "";
   renderCmdk();
-}
-
-function mapTuiKey(e) {
-  if (e.metaKey || e.altKey) return null;
-  if (e.ctrlKey) {
-    const map = {
-      c: "C-c",
-      d: "C-d",
-      u: "C-u",
-      a: "C-a",
-      e: "C-e",
-      k: "C-k",
-      w: "C-w",
-      l: "C-l",
-      n: "C-n",
-      p: "C-p",
-    };
-    return map[e.key.toLowerCase()] || null;
-  }
-  switch (e.key) {
-    case "Enter":
-      return "Enter";
-    case "Escape":
-      return "Escape";
-    case "Backspace":
-      return "BSpace";
-    case "Tab":
-      return "Tab";
-    case "ArrowUp":
-      return "Up";
-    case "ArrowDown":
-      return "Down";
-    case "ArrowLeft":
-      return "Left";
-    case "ArrowRight":
-      return "Right";
-    case "Home":
-      return "Home";
-    case "End":
-      return "End";
-    case "PageUp":
-      return "PPage";
-    case "PageDown":
-      return "NPage";
-    case "Delete":
-      return "DC";
-    case " ":
-      return "Space";
-    default:
-      if (e.key.length === 1) return e.key;
-      return null;
-  }
-}
-
-let keyQueue = [];
-let keyTimer = 0;
-
-function flushKeys() {
-  keyTimer = 0;
-  if (!keyQueue.length) return;
-  const batch = keyQueue;
-  keyQueue = [];
-  keys(batch);
-}
-
-function queueKey(k) {
-  keyQueue.push(k);
-  if (!keyTimer) keyTimer = setTimeout(flushKeys, 20);
 }
 
 function clearAttachments() {
@@ -2776,17 +2598,9 @@ async function onImages(files) {
     const saved = await ingestImages(files);
     if (!saved.length) return;
     setStatus("");
-    if (state.paneOpen && state.session?.tmux) {
-      const chunk = saved.map((s) => s.path).join(" ") + " ";
-      keys([chunk]);
-      for (const s of saved) {
-        if (s.preview) URL.revokeObjectURL(s.preview);
-      }
-      return;
-    }
     state.attachments = (state.attachments || []).concat(saved);
     renderAttach();
-    if (!state.paneOpen) $("input").focus();
+    $("input").focus();
   } catch (err) {
     setStatus(err.message || String(err));
   }
@@ -2924,11 +2738,6 @@ async function stopSession(sess, { confirm: ask } = {}) {
 function markSessionDone(sess) {
   return stopSession(sess, { confirm: false });
 }
-$("btn-pane").addEventListener("click", () => setPaneOpen(!state.paneOpen));
-$("tui").addEventListener("click", (e) => {
-  if (e.target.closest("button")) return;
-  if (state.paneOpen) tuiX?.term?.focus();
-});
 $("cmdk").addEventListener("click", (e) => {
   if (e.target === $("cmdk")) closeSpotlight();
 });
@@ -3010,7 +2819,7 @@ function onGlobalKey(e) {
     return;
   }
 
-  if (!mod && !e.altKey && e.key === "/" && !isTextField(e.target) && !state.paneOpen) {
+  if (!mod && !e.altKey && e.key === "/" && !isTextField(e.target)) {
     e.preventDefault();
     e.stopPropagation();
     openSpotlight();
@@ -3021,13 +2830,6 @@ function onGlobalKey(e) {
     e.preventDefault();
     e.stopPropagation();
     interruptSession();
-    return;
-  }
-
-  if (mod && !e.altKey && !e.shiftKey && key === "u") {
-    e.preventDefault();
-    e.stopPropagation();
-    toggleTui();
     return;
   }
 
@@ -3057,7 +2859,6 @@ function onGlobalKey(e) {
     setDiffOpen(false);
     return;
   }
-  if (state.paneOpen) return;
   if (state.session?.live && state.session.busy && !isConsole()) {
     e.preventDefault();
     e.stopPropagation();
@@ -3066,19 +2867,6 @@ function onGlobalKey(e) {
 }
 document.addEventListener("keydown", onGlobalKey, true);
 document.addEventListener("keypress", onGlobalKey, true);
-document.addEventListener("keydown", (e) => {
-  if (e.isComposing || cmdk.open) return;
-  if (!state.paneOpen || !state.session?.tmux) return;
-  if (hasXterm()) return;
-  if (e.target.closest("button, textarea, input, select")) return;
-  const k = mapTuiKey(e);
-  if (!k) return;
-  e.preventDefault();
-  queueKey(k);
-});
-$("tui-term").addEventListener("mousedown", () => {
-  if (state.paneOpen) tuiX?.term?.focus();
-});
 document.addEventListener(
   "paste",
   (e) => {
@@ -3086,15 +2874,6 @@ document.addEventListener(
     if (images.length) {
       e.preventDefault();
       onImages(images);
-      return;
-    }
-    if (state.paneOpen && state.session?.tmux) {
-      if (e.target.closest("button, textarea, input, select")) return;
-      if (hasXterm()) return;
-      const t = e.clipboardData?.getData("text") || "";
-      if (!t) return;
-      e.preventDefault();
-      keys([t]);
     }
   },
   true,
@@ -3115,7 +2894,6 @@ function bindDrop(el) {
 }
 bindDrop($("chat"));
 bindDrop($("composer"));
-bindDrop($("tui"));
 window.addEventListener("hashchange", onHash);
 
 let audioCtx = null;

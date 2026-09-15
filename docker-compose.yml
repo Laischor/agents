@@ -131,7 +131,7 @@ services:
     # Override via AGENTS_MEM_LIMIT in .env (e.g. 4g, 6g)
     mem_limit: ${AGENTS_MEM_LIMIT:-3g}
     ports:
-      - "127.0.0.1:3000:3000"   # wrap — native CLI sessions (tmux / OpenCode API)
+      - "127.0.0.1:3000:3000"   # wrap — native CLI sessions (headless / OpenCode API)
     environment:
       # Cursor CLI
       CURSOR_API_KEY: ${CURSOR_API_KEY:-}

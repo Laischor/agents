@@ -409,8 +409,7 @@ main {
   opacity: 1;
   pointer-events: auto;
 }
-#chat:has(#diff:not([hidden])) #btn-diff,
-#chat:has(#tui:not([hidden])) #btn-diff {
+#chat:has(#diff:not([hidden])) #btn-diff {
   display: none !important;
 }
 
@@ -611,18 +610,6 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 #chat {
   flex: 1; min-height: 0; position: relative;
   display: flex; flex-direction: column;
-}
-#tui {
-  position: absolute; inset: 0;
-  background: #0e0f0b;
-  display: flex; flex-direction: column;
-  z-index: 2;
-  border-bottom: 1px solid var(--line);
-}
-#tui[hidden] { display: none !important; }
-#tui-term { flex: 1; min-height: 0; padding: 8px; }
-#btn-pane.on {
-  background: var(--accent); color: #1a160c; border-color: var(--accent);
 }
 .msg {
   max-width: 780px; padding: 12px 14px; border-radius: var(--radius);

@@ -231,7 +231,7 @@ path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 }
 
-# Native-session wrap (tmux Claude/Cursor, OpenCode HTTP). Only the
+# Native-session wrap (headless CLIs + PTY console). Only the
 # long-lived agents service sets AGENTS_WRAP_SERVE=1.
 ensure_wrap_serve() {
   case "${AGENTS_WRAP_SERVE:-0}" in

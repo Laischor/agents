@@ -105,9 +105,6 @@ RUN arch="$(dpkg --print-architecture)" \
   && rm -f /tmp/opencode.tar.gz /tmp/opencode \
   && opencode --version
 
-RUN apt-get update && apt-get install -y --no-install-recommends tmux \
-  && rm -rf /var/lib/apt/lists/*
-
 # Ensure PATH survives login shells (bash -l)
 RUN printf '%s\n' 'export PATH="/root/.local/bin:$PATH"' > /etc/profile.d/agents-path.sh
 

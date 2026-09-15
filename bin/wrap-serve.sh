@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Native-session web wrap (Claude/Cursor via tmux, OpenCode via its HTTP API).
+# Native-session web wrap (headless Claude/Cursor, OpenCode HTTP, PTY console).
 # Started once from container-entrypoint when AGENTS_WRAP_SERVE=1.
 
 set -u
