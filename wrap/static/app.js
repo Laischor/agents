@@ -374,6 +374,7 @@ const TERM_THEME = {
 
 let shX = null;
 let diffTimer = 0;
+let diffRetry = 0;
 let rawBuf = "";
 let rawTimer = 0;
 
@@ -522,6 +523,13 @@ function stopDiffPoll() {
   }
 }
 
+function stopDiffRetry() {
+  if (diffRetry) {
+    clearTimeout(diffRetry);
+    diffRetry = 0;
+  }
+}
+
 function diffLineHtml(line) {
   return renderDiff(line);
 }
@@ -607,7 +615,8 @@ function renderGitDiff() {
   pane.innerHTML = diffLineHtml(cur.diff) + (cur.truncated ? `\n<span class="diff-file">… truncated</span>` : "");
 }
 
-async function loadDiff() {
+async function loadDiff(opts) {
+  const forced = Boolean(opts && opts.diffs);
   const cwd = activeCwd();
   const btn = $("btn-diff");
   const box = $("diff-session");
@@ -617,6 +626,7 @@ async function loadDiff() {
   if (box) box.checked = Boolean(state.diffSession);
   if (!cwd || isConsole()) {
     state.diff = null;
+    stopDiffRetry();
     if (btn) {
       btn.hidden = true;
       btn.classList.remove("on");
@@ -624,11 +634,15 @@ async function loadDiff() {
     if (state.diffOpen) setDiffOpen(false);
     return;
   }
+  // Diff bodies are the expensive part (one git diff per changed file), so they
+  // are only requested when the pane is open or a turn asked for them.
+  const wantDiffs = forced || state.diffOpen;
   try {
     let url = "/api/git?cwd=" + encodeURIComponent(cwd);
     if (canScope && state.diffSession) {
       url += "&sid=" + encodeURIComponent(state.session.id);
     }
+    if (wantDiffs) url += "&diffs=1";
     state.diff = await api(url);
     const n = (state.diff?.ok && state.diff.files) ? state.diff.files.length : 0;
     const nestedN = (state.diff?.ok && state.diff.nested) ? state.diff.nested.length : 0;
@@ -640,6 +654,21 @@ async function loadDiff() {
     }
     if (state.diffOpen) renderGitDiff();
     if (!dirty && state.diffOpen) setDiffOpen(false);
+    // The pane is open but this response carries no diff bodies: fetch them
+    // once, so opening the pane stays instant while still filling in.
+    const wantsBody = Boolean(state.diff?.ok && (state.diff.files || []).length);
+    const hasBody = wantsBody && (state.diff.files || []).some(
+      (f) => f.diff || f.binary || f.truncated
+    );
+    if (state.diffOpen && wantsBody && !hasBody && !forced) {
+      stopDiffRetry();
+      diffRetry = setTimeout(() => {
+        diffRetry = 0;
+        loadDiff({ diffs: true });
+      }, 120);
+    } else if (hasBody || !state.diffOpen) {
+      stopDiffRetry();
+    }
   } catch (err) {
     state.diff = { ok: false, error: err.message || String(err) };
     if (btn) btn.hidden = true;
@@ -650,15 +679,34 @@ function setDiffOpen(on) {
   state.diffOpen = Boolean(on) && !isConsole();
   if (state.diffOpen) {
     renderGitDiff();
+    // Bodies may be absent when the cached listing served this response.
+    loadDiff({ diffs: true });
+  } else {
+    stopDiffRetry();
   }
   applyChrome();
 }
 
 function watchDiff() {
   stopDiffPoll();
+  stopDiffRetry();
   if (!activeCwd() || isConsole()) return;
   loadDiff();
-  diffTimer = setInterval(loadDiff, 2500);
+}
+
+// A finished turn is the only moment the working tree can have changed, so the
+// server pushes it and this is the sole trigger — no interval polling.
+function onTurnEnd(ev) {
+  let info = {};
+  try {
+    info = JSON.parse(ev.data || "{}");
+  } catch (_) {
+    /* ignore */
+  }
+  if (info.sid && state.session?.id && info.sid !== state.session.id) return;
+  if (document.hidden) return;
+  loadDiff({ diffs: Boolean(state.diffOpen) });
+  loadSessions();
 }
 
 const PASTE_IMG_RE = /(^|\s)(\/\S+\.wrap-pastes\/\S+\.(?:png|jpe?g|gif|webp))/gi;
@@ -1863,6 +1911,7 @@ function connectStream(id) {
       /* ignore */
     }
   });
+  es.addEventListener("turnend", onTurnEnd);
   es.addEventListener("gone", () => {
     es.close();
     if (isConsole()) {
@@ -2981,5 +3030,14 @@ Promise.all([loadCatalog(), loadProjects(), loadHealth(), loadSessions()]).then(
   watchDiff();
 });
 connectAlerts();
-setInterval(loadHealth, 15000);
-setInterval(loadSessions, 8000);
+setInterval(() => {
+  if (document.hidden) return;
+  loadHealth();
+}, 30000);
+// No session/ diff interval: both are refreshed by the session stream (sync and
+// turnend) plus explicit user actions, which is all that can change them.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  loadSessions();
+  if (activeCwd()) loadDiff();
+});

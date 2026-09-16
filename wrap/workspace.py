@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -42,6 +43,59 @@ NESTED_SKIP_DIRS = frozenset({
 NESTED_MAX_DEPTH = 4
 NESTED_WALK_BUDGET_S = 1.0
 
+# Git status/walk results are re-used for a short window. Polling the diff view
+# otherwise spawns ~116 git subprocesses every 2.5 s, and every one of those
+# stats files over the (slow) Colima bind mount.
+CACHE_TTL_S = 10.0
+_nested_cache: dict[str, tuple[float, list[Path], bool]] = {}
+_status_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_toplevel_cache: dict[str, tuple[float, Any]] = {}
+_diff_cache: dict[str, tuple[float, tuple[str, bool, bool]]] = {}
+_CACHE_LOCK = threading.Lock()
+_STATUS_CACHE_MAX = 64
+_DIFF_CACHE_MAX = 256
+_nested_cache_gen = 0
+_status_cache_gen = 0
+
+
+def cache_gen() -> tuple[int, int]:
+    """Generation stamps, bumped whenever a write may have changed a repo."""
+    with _CACHE_LOCK:
+        return _nested_cache_gen, _status_cache_gen
+
+
+def invalidate(gen: tuple[int, int] | None = None) -> None:
+    """Drop cached snapshots; with a generation stamp only if it is unchanged."""
+    global _nested_cache_gen, _status_cache_gen
+    with _CACHE_LOCK:
+        if gen is not None and gen != (_nested_cache_gen, _status_cache_gen):
+            return
+        _nested_cache.clear()
+        _status_cache.clear()
+        _toplevel_cache.clear()
+        _diff_cache.clear()
+        _nested_cache_gen += 1
+        _status_cache_gen += 1
+
+
+def _cache_lookup(cache: dict[str, Any], key: str) -> Any:
+    with _CACHE_LOCK:
+        hit = cache.get(key)
+    if not hit:
+        return None
+    if time.monotonic() - hit[0] >= CACHE_TTL_S:
+        return None
+    return hit[1]
+
+
+def _cache_store(cache: dict[str, Any], key: str, value: Any, maxsize: int) -> Any:
+    with _CACHE_LOCK:
+        cache[key] = (time.monotonic(), value)
+        while len(cache) > maxsize:
+            cache.pop(next(iter(cache)), None)
+    return value
+
+
 AHEAD_RE = re.compile(r"ahead (\d+)")
 BEHIND_RE = re.compile(r"behind (\d+)")
 
@@ -56,19 +110,26 @@ def _git(root: Path, *args: str, timeout: float = GIT_TIMEOUT) -> subprocess.Com
 
 
 def git_toplevel(cwd: Path) -> Path | None:
+    key = str(cwd)
+    hit = _cache_lookup(_toplevel_cache, key)
+    if hit is not None:
+        return hit or None
+    result: Path | None = None
     try:
         r = _git(cwd, "rev-parse", "--show-toplevel")
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-    if r.returncode != 0:
-        return None
-    raw = r.stdout.decode("utf-8", "replace").strip()
-    if not raw:
-        return None
-    try:
-        return Path(raw).resolve()
-    except OSError:
-        return None
+        r = None
+    if r is not None and r.returncode == 0:
+        raw = r.stdout.decode("utf-8", "replace").strip()
+        if raw:
+            try:
+                result = Path(raw).resolve()
+            except OSError:
+                result = None
+    # A working tree does not change during a turn, so this is cached too: the
+    # nested repos otherwise cost one rev-parse each per poll.
+    _cache_store(_toplevel_cache, key, result, maxsize=_STATUS_CACHE_MAX)
+    return result
 
 
 def _decode(raw: bytes) -> str:
@@ -101,6 +162,19 @@ def _status_letter(xy: str) -> str:
 
 
 def _file_diff(
+    root: Path, rel: str, untracked: bool, against: str = "HEAD"
+) -> tuple[str, bool, bool]:
+    key = f"{root}\x00{rel}\x00{int(bool(untracked))}\x00{against}"
+    hit = _cache_lookup(_diff_cache, key)
+    if hit is not None:
+        return hit
+    return _cache_store(
+        _diff_cache, key, _file_diff_uncached(root, rel, untracked, against),
+        maxsize=_DIFF_CACHE_MAX,
+    )
+
+
+def _file_diff_uncached(
     root: Path, rel: str, untracked: bool, against: str = "HEAD"
 ) -> tuple[str, bool, bool]:
     path = root / rel
@@ -171,6 +245,10 @@ def _name_status_against(root: Path, against: str, timeout: float) -> list[dict[
 
 def _find_nested_repos(root: Path) -> tuple[list[Path], bool]:
     """Working trees under root with their own .git (nested clones / submodules)."""
+    key = str(root)
+    hit = _cache_lookup(_nested_cache, key)
+    if hit is not None:
+        return hit
     found: list[Path] = []
     queued = deque([(root, 0)])
     walked = 0
@@ -209,10 +287,14 @@ def _find_nested_repos(root: Path) -> tuple[list[Path], bool]:
                 continue
             queued.append((Path(entry.path), depth + 1))
     found.sort(key=lambda p: str(p))
-    return found, truncated
+    return _cache_store(_nested_cache, key, (found, truncated), maxsize=16)
 
 
 def _status_snapshot(root: Path, timeout: float = GIT_TIMEOUT) -> dict[str, Any]:
+    key = str(root)
+    hit = _cache_lookup(_status_cache, key)
+    if hit is not None:
+        return _snap_copy(hit)
     try:
         r = _git(
             root,
@@ -266,15 +348,24 @@ def _status_snapshot(root: Path, timeout: float = GIT_TIMEOUT) -> dict[str, Any]
                 "untracked": xy == "??",
             }
         )
-    return {
-        "ok": True,
-        "branch": branch,
-        "upstream": upstream,
-        "ahead": ahead,
-        "behind": behind,
-        "files": files,
-        "status_lines": max(0, len(lines) - 1),
-    }
+    snap = _snap_copy(
+        {
+            "ok": True,
+            "branch": branch,
+            "upstream": upstream,
+            "ahead": ahead,
+            "behind": behind,
+            "files": files,
+            "status_lines": max(0, len(lines) - 1),
+        }
+    )
+    _cache_store(_status_cache, key, snap, maxsize=_STATUS_CACHE_MAX)
+    return _snap_copy(snap)
+
+
+def _snap_copy(snap: dict[str, Any]) -> dict[str, Any]:
+    """Callers stamp _root/_rel/repo onto file entries — never hand them the cache."""
+    return {**snap, "files": [dict(f) for f in (snap.get("files") or [])]}
 
 
 def _attach_repo(files: list[dict[str, Any]], repo_root: Path, prefix: str) -> None:
@@ -306,7 +397,8 @@ def _item_in_session(item: dict[str, Any], touched: list[str]) -> bool:
 
 
 def git_view(
-    cwd: Path, host_root: Path, only_paths: list[str] | None = None
+    cwd: Path, host_root: Path, only_paths: list[str] | None = None,
+    with_diffs: bool = True,
 ) -> dict[str, Any]:
     try:
         root = git_toplevel(cwd)
@@ -401,23 +493,35 @@ def git_view(
     )
     truncated_list = len(files) > GIT_DIFF_MAX_FILES
     files = files[:GIT_DIFF_MAX_FILES]
-    for item in files:
-        repo_root = item.pop("_root", root)
-        rel = str(item.pop("_rel", item["path"]))
-        against = str(item.pop("_against", "HEAD") or "HEAD")
-        diff, binary, truncated = _file_diff(
-            repo_root, rel, bool(item["untracked"]), against=against
-        )
-        item["diff"] = diff
-        item["binary"] = binary
-        item["truncated"] = truncated
+    if with_diffs:
+        for item in files:
+            repo_root = item.pop("_root", root)
+            rel = str(item.pop("_rel", item["path"]))
+            against = str(item.pop("_against", "HEAD") or "HEAD")
+            diff, binary, truncated = _file_diff(
+                repo_root, rel, bool(item["untracked"]), against=against
+            )
+            item["diff"] = diff
+            item["binary"] = binary
+            item["truncated"] = truncated
+    else:
+        # Listing only: the diff button needs files.length and dirty_total, and
+        # one git diff per changed file per poll was the single biggest cost.
+        for item in files:
+            item.pop("_root", None)
+            item.pop("_rel", None)
+            item.pop("_against", None)
+            item["diff"] = ""
+            item["binary"] = False
+            item["truncated"] = False
     stat = ""
-    try:
-        sr = _git(root, "diff", "--shortstat", "HEAD")
-        if sr.returncode == 0:
-            stat = _decode(sr.stdout).strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        stat = ""
+    if with_diffs:
+        try:
+            sr = _git(root, "diff", "--shortstat", "HEAD")
+            if sr.returncode == 0:
+                stat = _decode(sr.stdout).strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            stat = ""
     nested_file_n = sum(n["files"] for n in nested_meta)
     if nested_file_n:
         extra = f"{nested_file_n} nested"

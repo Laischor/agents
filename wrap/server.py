@@ -106,6 +106,103 @@ _alert_last: dict[str, float] = {}
 _alert_timers: dict[str, threading.Timer] = {}
 _alert_timer_lock = threading.Lock()
 
+# The session list is polled every 8 s and walks ~590 transcript files (103 ms,
+# mostly stats over the slow bind mount). It only changes when a turn starts or
+# ends, so it is cached; the generation stamp is bumped when that happens and
+# whenever the pin/hide sets are written.
+HISTORY_TTL_S = 45.0
+_history_cache: dict[str, Any] = {"t": 0.0, "gen": -1, "rows": []}
+_history_gen = 0
+
+# Turn boundaries are inferred from the busy flag the sync stream already
+# computes. A turn that changed state emits "turnend" once its writes have
+# settled — that is the only moment the diff view has to refresh, so the client
+# no longer polls git at all.
+TURN_SETTLE_S = 2.0
+_turn_state: dict[str, dict[str, Any]] = {}
+_turn_lock = threading.Lock()
+
+
+def bump_history_gen() -> None:
+    global _history_gen
+    with _lock:
+        _history_gen += 1
+
+
+def history_gen() -> int:
+    with _lock:
+        return _history_gen
+
+
+def turn_seq(sid: str) -> int:
+    """Latest turn-end sequence for a session, so a new stream starts caught up."""
+    with _turn_lock:
+        st = _turn_state.get(sid)
+        return int((st or {}).get("seq") or 0)
+
+
+def turn_step(
+    sid: str, busy: bool, fp: str, gen: Any
+) -> tuple[bool, dict[str, Any] | None, Any]:
+    """Advance the turn state machine for one stream iteration.
+
+    Returns (session_list_changed, latest_turn_end, gen_when_turn_opened).
+    The turn-end is broadcast: it carries a sequence number that every attached
+    stream compares against its own high-water mark, so all tabs refresh rather
+    than whichever one happened to run the tick that detected the transition.
+    """
+    with _turn_lock:
+        st = _turn_state.get(sid)
+        if st is None:
+            # A turn already running when we attach: we cannot know whether it
+            # wrote anything, so assume it did. A spurious refresh is cheap.
+            st = {
+                "busy": busy,
+                "n": 1 if busy else 0,
+                "edits": 0,
+                "gen_start": gen,
+                "settle": 0.0,
+                "prev": None,
+                "seq": 0,
+                "last": None,
+            }
+            _turn_state[sid] = st
+        bump_hist = False
+        # Order matters: the turn-opening branch resets the change counter, so it
+        # must run before this iteration's change is counted — otherwise the very
+        # first busy sample that carries the change would have it wiped again.
+        if busy and not st.get("busy"):
+            st["gen_start"] = gen
+            st["n"] = 0
+            bump_hist = True
+        if fp != st.get("prev"):
+            st["prev"] = fp
+            if busy:
+                st["n"] = int(st.get("n") or 0) + 1
+        if busy:
+            st["busy"] = True
+            st["settle"] = 0.0
+        elif st.get("busy"):
+            st["busy"] = False
+            bump_hist = True
+            st["edits"] = int(st.get("n") or 0)
+            st["n"] = 0
+            # Writes routinely land just after the turn flag drops.
+            st["settle"] = time.monotonic() + TURN_SETTLE_S
+        gen_start = None
+        if st.get("settle") and time.monotonic() >= float(st["settle"]):
+            st["settle"] = 0.0
+            if st.get("edits"):
+                gen_start = st.get("gen_start")
+                st["seq"] = int(st.get("seq") or 0) + 1
+                st["last"] = {
+                    "seq": st["seq"],
+                    "edits": int(st["edits"]),
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+            st["edits"] = 0
+        return bump_hist, st.get("last"), gen_start
+
 
 def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1962,6 +2059,7 @@ def hide_history(agent: str, native_id: str) -> None:
     with _lock:
         HIDDEN.add(key)
         PINNED[:] = [item for item in PINNED if item != key]
+    bump_history_gen()
     persist_state()
 
 
@@ -1999,6 +2097,7 @@ def set_pinned(agent: str, native_id: str, pinned: bool) -> list[str]:
             PINNED.append(key)
             HIDDEN.discard(key)
         out = list(PINNED)
+    bump_history_gen()
     persist_state()
     return out
 
@@ -2020,6 +2119,22 @@ def live_native_skip() -> tuple[set[tuple[str, str]], set[str], set[str]]:
 
 
 def list_history() -> list[dict[str, Any]]:
+    """Cached history listing — see HISTORY_TTL_S for why this is not recomputed."""
+    now = time.monotonic()
+    gen = history_gen()
+    if (
+        _history_cache["gen"] == gen
+        and now - float(_history_cache["t"] or 0.0) < HISTORY_TTL_S
+    ):
+        return _history_cache["rows"]
+    rows = _list_history_uncached()
+    _history_cache["t"] = now
+    _history_cache["gen"] = gen
+    _history_cache["rows"] = rows
+    return rows
+
+
+def _list_history_uncached() -> list[dict[str, Any]]:
     projects = [Path(p["path"]) for p in list_projects()]
     skip, oc_skip, hm_skip = live_native_skip()
     pinned = history_pinned()
@@ -2449,6 +2564,8 @@ def open_session(
         persist_state()
         if prompt:
             enqueue_send(sid, prompt)
+        # A new session leaves the history list (it is live now).
+        bump_history_gen()
         return sess
 
     raise RuntimeError(f"unknown agent: {agent}")
@@ -2522,6 +2639,9 @@ def kill_session(sid: str) -> None:
         ptyio.kill(sid)
     with _lock:
         SESSIONS.pop(sid, None)
+    # Closing a session turns it back into a history entry.
+    _turn_state.pop(sid, None)
+    bump_history_gen()
     persist_state()
 
 
@@ -2617,8 +2737,16 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/git":
                 cwd = safe_cwd((qs.get("cwd") or [""])[0])
                 sid = str((qs.get("sid") or [""])[0] or "").strip()
+                want = str((qs.get("diffs") or [""])[0] or "").strip() in ("1", "true", "yes")
                 only = session_mutate_paths(sid, cwd) if sid else None
-                st, raw, ct = json_bytes(ws.git_view(cwd, HOST_PROJECTS, only_paths=only or None))
+                st, raw, ct = json_bytes(
+                    ws.git_view(
+                        cwd,
+                        HOST_PROJECTS,
+                        only_paths=only or None,
+                        with_diffs=want,
+                    )
+                )
                 return self._send(st, raw, ct)
             if path == "/api/file":
                 raw_path = (qs.get("path") or [""])[0]
@@ -2875,6 +3003,11 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
             return
 
+    def _sse(self, event: str, obj: dict[str, Any]) -> None:
+        body = json.dumps(obj, ensure_ascii=False)
+        self.wfile.write(f"event: {event}\ndata: {body}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
     def _stream(self, sid: str) -> None:
         sess = get_session(sid)
         self.send_response(200)
@@ -2887,13 +3020,16 @@ class Handler(BaseHTTPRequestHandler):
             self._console_stream(sid)
             return
         last = ""
+        # Every attached stream tracks which turn-end it has already reported, so
+        # a transition detected by one tab reaches all of them.
+        seen_seq = turn_seq(sid)
         try:
             while True:
                 try:
                     sess = get_session(sid)
                 except KeyError:
-                    self.wfile.write(b"event: gone\ndata: {}\n\n")
-                    self.wfile.flush()
+                    _turn_state.pop(sid, None)
+                    self._sse("gone", {})
                     return
                 payload = session_public(sess)
                 fp = json.dumps(
@@ -2919,13 +3055,26 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 if fp != last:
                     last = fp
-                    chunk = f"event: sync\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    chunk = f"event: sync\ndata: {json.dumps(payload, ensure_ascii=False)}\\n\\n"
                     self.wfile.write(chunk.encode("utf-8"))
                     self.wfile.flush()
+                busy = bool(payload.get("busy"))
+                bump_hist, turn_end, gen_start = turn_step(
+                    sid, busy, fp, ws.cache_gen()
+                )
+                if bump_hist:
+                    # Turn boundaries are when the session list can change.
+                    bump_history_gen()
+                if turn_end and int(turn_end.get("seq") or 0) > seen_seq:
+                    seen_seq = int(turn_end["seq"])
+                    ws.invalidate(gen_start)
+                    # Only the stream that ran the transition invalidates; the
+                    # others just refresh off the broadcast.
+                    self._sse("turnend", {"sid": sid, **turn_end})
                 if sess.get("agent") == "hermes":
-                    hm.wait(str(sess.get("hm_id") or ""), timeout=0.35 if payload.get("busy") else 1.2)
+                    hm.wait(str(sess.get("hm_id") or ""), timeout=0.35 if busy else 1.2)
                 else:
-                    time.sleep(0.4 if payload.get("busy") else 1.2)
+                    time.sleep(0.4 if busy else 1.2)
         except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
             return
 
