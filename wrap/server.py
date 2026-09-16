@@ -78,6 +78,9 @@ HIDDEN: set[str] = set()
 PINNED: list[str] = []  # agent:native_id, most recently pinned last
 _catalog_lock = threading.Lock()
 _catalog_cache: dict[str, Any] = {"at": 0.0, "data": None}
+# A "fresh" catalog still reuses a build this recent, so opening the settings
+# pane repeatedly cannot re-run the CLI model probes every time.
+CATALOG_FRESH_DEBOUNCE_S = 20.0
 _send_q: dict[str, Queue[str | None]] = {}
 _send_buf: dict[str, list[str]] = {}
 _send_workers: dict[str, threading.Thread] = {}
@@ -1791,18 +1794,36 @@ def parse_labeled_models(lines: list[str]) -> list[dict[str, str]]:
     return out
 
 
-def catalog() -> dict[str, Any]:
+def catalog(*, fresh: bool = False) -> dict[str, Any]:
+    """Model catalog. Cached 120 s; `fresh` bypasses it but stays debounced.
+
+    A cold `opencode serve` makes `oc.providers()` return a single placeholder
+    entry, and the CLI fallback then costs a few seconds — so callers that need
+    a trustworthy model list (the settings pane) ask for a fresh one instead of
+    silently showing whatever the 120 s cache froze.
+    """
     now = time.time()
     with _catalog_lock:
         cached = _catalog_cache["data"]
-        if cached and now - float(_catalog_cache["at"]) < 120:
+        age = now - float(_catalog_cache["at"] or 0.0)
+        # Even a fresh request reuses a very recent build, so repeated pane opens
+        # cannot hammer the CLIs.
+        if cached and age < (CATALOG_FRESH_DEBOUNCE_S if fresh else 120.0):
             return _catalog_with_title(cached)
 
     cursor_models = [{"id": "", "label": "CLI default"}]
     cursor_models.extend(parse_labeled_models(run_lines(["agent", "models"])))
     oc_models = oc.providers(HOST_PROJECTS if HOST_PROJECTS.is_dir() else None)
+    oc_stale = False
     if len(oc_models) <= 1:
+        # Cold `opencode serve`: providers() gives nothing, so fall back to the
+        # CLI. Log it — a silently short model list is what makes the settings
+        # pane look like it lost its configured model.
+        log("catalog: opencode serve cold, probing CLI for models")
         oc_models.extend(parse_labeled_models(run_lines(["opencode", "models"])))
+        # Still nothing useful: the list cannot be trusted, say so instead of
+        # letting the UI imply the configured model no longer exists.
+        oc_stale = len(oc_models) <= 1
     hermes_models = [{"id": "", "label": "Gateway default"}]
     if hermes_on():
         try:
@@ -1829,6 +1850,7 @@ def catalog() -> dict[str, Any]:
         },
         "opencode": {
             "models": oc_models,
+            "stale": oc_stale,
             "effort": [
                 {"id": "", "label": "Default"},
                 {"id": "high", "label": "High"},
@@ -2710,7 +2732,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/alerts":
                 return self._alerts_stream()
             if path == "/api/catalog":
-                st, raw, ct = json_bytes(catalog())
+                fresh = str((qs.get("fresh") or [""])[0] or "").strip() in ("1", "true", "yes")
+                st, raw, ct = json_bytes(catalog(fresh=fresh))
                 return self._send(st, raw, ct)
             if path == "/api/projects":
                 st, raw, ct = json_bytes({"projects": list_projects()})

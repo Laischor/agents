@@ -853,8 +853,12 @@ function fillSettings() {
 
 function titleFallbackState() {
   const t = state.catalog.title || {};
+  // No hardcoded model here: an invented "haiku" default is what made a
+  // configured fallback look like it had reset itself. Server state is the
+  // truth; absent that, show Off.
   return {
-    fallback: t.fallback || { agent: "claude", model: "haiku" },
+    fallback: t.fallback || { agent: "", model: "" },
+    fallbackKnown: Boolean(t.fallback),
     agents: t.agents || [
       { id: "", label: "Off" },
       { id: "claude", label: "Claude" },
@@ -887,23 +891,53 @@ function titleSettingsCard() {
   const modelLab = document.createElement("label");
   modelLab.append("Model");
   const modelSel = document.createElement("select");
+  // The configured model may be absent from a short/degenerate catalog (e.g. a
+  // cold opencode serve). Say so instead of silently snapping the select to its
+  // first option and then writing that wrong value back.
+  const notice = document.createElement("p");
+  notice.className = "lead title-catalog-note";
+  notice.hidden = true;
+  let modelMissing = false;
+
   const fillModels = () => {
     const agent = agentSel.value;
     modelLab.hidden = !agent;
     if (!agent) {
       fillSelect(modelSel, [{ id: "", label: "—" }], "");
+      modelMissing = false;
+      notice.hidden = true;
       return;
     }
     const cat = state.catalog[agent] || { models: [] };
     const models = sortModels(cat.models || []);
-    fillSelect(modelSel, models.length ? models : [{ id: "", label: "CLI default" }], fallback.model || "");
+    const want = fallback.model || "";
+    const list = models.length ? models : [{ id: "", label: "CLI default" }];
+    const has = !want || list.some((m) => m.id === want);
+    if (!has) {
+      // Keep the configured value visible and selected.
+      fillSelect(modelSel, [...list, { id: want, label: want }], want);
+    } else {
+      fillSelect(modelSel, list, want);
+    }
+    modelMissing = Boolean(want) && !has;
+    notice.hidden = !modelMissing;
+    if (modelMissing) {
+      const label = cat.stale
+        ? "The model list could not be refreshed"
+        : "This model is not in the current list";
+      notice.textContent = `${label} — keeping the saved value.`;
+    }
   };
   fillModels();
   modelLab.appendChild(modelSel);
   card.appendChild(modelLab);
+  card.appendChild(notice);
 
   const save = async () => {
-    const next = { agent: agentSel.value, model: agentSel.value ? modelSel.value : "" };
+    const next = {
+      agent: agentSel.value,
+      model: agentSel.value ? modelSel.value : "",
+    };
     try {
       const out = await api("/api/settings", {
         method: "POST",
@@ -913,6 +947,9 @@ function titleSettingsCard() {
         ...(state.catalog.title || {}),
         fallback: out.title_fallback || next,
       };
+      fallback.model = (state.catalog.title.fallback || {}).model || "";
+      modelMissing = false;
+      notice.hidden = true;
     } catch (err) {
       setStatus(err.message || String(err));
     }
@@ -922,7 +959,15 @@ function titleSettingsCard() {
     fillModels();
     save();
   });
-  modelSel.addEventListener("change", save);
+  // Guard: a select whose value never matched the saved model must not be
+  // written back unnoticed — that is how a setting appeared to reset itself.
+  modelSel.addEventListener("change", () => {
+    if (modelMissing) {
+      modelMissing = false;
+      notice.hidden = true;
+    }
+    save();
+  });
   return card;
 }
 
@@ -932,6 +977,9 @@ function openSettings() {
   fillSettings();
   applyChrome();
   closeMenu();
+  // The settings pane is exactly where a stale/short model list produces a
+  // wrong-looking model, so refresh the catalog as it opens.
+  loadCatalog({ fresh: true });
 }
 
 function closeSettings() {
@@ -1581,9 +1629,10 @@ async function loadProjects() {
   }
 }
 
-async function loadCatalog() {
+async function loadCatalog(opts) {
+  const fresh = Boolean(opts && opts.fresh);
   try {
-    state.catalog = await api("/api/catalog");
+    state.catalog = await api(fresh ? "/api/catalog?fresh=1" : "/api/catalog");
     applyCatalog();
     if (state.settings) fillSettings();
   } catch (err) {
