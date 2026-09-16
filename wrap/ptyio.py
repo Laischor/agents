@@ -54,7 +54,6 @@ class _Pty:
         env["COLORTERM"] = "truecolor"
         env["WRAP_SESSION_ID"] = self.sid
         env["WRAP_URL"] = f"http://127.0.0.1:{os.environ.get('WRAP_PORT', '3000')}"
-        env.pop("TMUX", None)
         def _child() -> None:
             os.setsid()
             try:

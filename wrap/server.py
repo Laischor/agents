@@ -650,7 +650,6 @@ def load_state() -> None:
                 continue
             if sess.get("agent") == "console":
                 continue
-            sess.pop("tmux", None)
             SESSIONS[str(sess["id"])] = sess
             if sess.get("agent") == "hermes" and sess.get("hm_id") and sess.get("cwd"):
                 hm.remember_cwd(str(sess["hm_id"]), str(sess["cwd"]))
@@ -3078,7 +3077,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 if fp != last:
                     last = fp
-                    chunk = f"event: sync\ndata: {json.dumps(payload, ensure_ascii=False)}\\n\\n"
+                    chunk = f"event: sync\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     self.wfile.write(chunk.encode("utf-8"))
                     self.wfile.flush()
                 busy = bool(payload.get("busy"))
