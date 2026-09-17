@@ -767,6 +767,8 @@ function loadPrefsFor(agent) {
 }
 
 function writePrefsFor(agent, prefs) {
+  // Defaults only change from Settings. The new-session bar reads these
+  // but must not write them — a one-off model pick is not the new default.
   if (!agent || agent === "console") return;
   try {
     localStorage.setItem(
@@ -781,14 +783,6 @@ function writePrefsFor(agent, prefs) {
     /* ignore */
   }
   if (chatAgent() === agent && !(state.session && state.session.live)) applyCatalog();
-}
-
-function savePrefs() {
-  writePrefsFor(chatAgent(), {
-    model: $("model").value,
-    effort: $("effort").value,
-    fast: $("fast").checked,
-  });
 }
 
 function catalogAgents() {
@@ -1226,7 +1220,7 @@ function applyChrome() {
   $("btn-int").title = `Interrupt (${modSym()}+.)`;
   $("btn-clear").hidden = !(viewing && sess?.cwd && sess?.agent && sess.agent !== "console");
   $("btn-diff").title = `Diff (${modSym()}+J)`;
-  $("search").title = `Filter sidebar. ${modSym()}K opens Spotlight.`;
+  $("search").title = `Filter sidebar. ${modSym()}K Spotlight · ${modSym()}I chat input.`;
   $("btn-new").title = "New session";
   $("chat").hidden = isConsole(sess);
   $("console").hidden = !isConsole(sess);
@@ -1660,7 +1654,6 @@ function setAgent(agent) {
     applyChrome();
     return;
   }
-  savePrefs();
   state.agent = agent;
   applyCatalog();
   applyChrome();
@@ -1676,6 +1669,7 @@ function setProject(cwd) {
 }
 
 function renderSession(sess) {
+  const switched = state.session?.id !== sess.id;
   state.settings = false;
   state.session = sess;
   state.draft = false;
@@ -1689,7 +1683,7 @@ function renderSession(sess) {
     state.diffOpen = false;
     showConsoleTerm(sess);
   } else {
-    renderMessages(mergeMessages(sess.messages || []));
+    renderMessages(mergeMessages(sess.messages || []), { force: switched });
   }
   applyChrome();
   renderSessions();
@@ -1734,9 +1728,37 @@ function bindToolHint(span, text) {
   span.addEventListener("pointerleave", hideToolHint);
 }
 
-function renderMessages(messages) {
+function nearBottom(el, slack = 48) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= slack;
+}
+
+function scrollAnchor(log) {
+  const base = log.getBoundingClientRect().top;
+  for (const el of log.children) {
+    const r = el.getBoundingClientRect();
+    if (r.bottom <= base + 1) continue;
+    return { key: el.dataset.mid || "", delta: r.top - base };
+  }
+  return null;
+}
+
+function restoreAnchor(log, anchor, prevTop) {
+  const el = anchor?.key ? log.querySelector(`[data-mid="${CSS.escape(anchor.key)}"]`) : null;
+  if (!el) {
+    log.scrollTop = prevTop;
+    return;
+  }
+  const base = log.getBoundingClientRect().top;
+  log.scrollTop += el.getBoundingClientRect().top - base - anchor.delta;
+}
+
+function renderMessages(messages, opts = {}) {
   hideToolHint();
   const log = $("log");
+  // Follow new output only if the reader is already at the bottom; else hold their place.
+  const stick = Boolean(opts.force) || nearBottom(log);
+  const prevTop = log.scrollTop;
+  const anchor = stick ? null : scrollAnchor(log);
   log.innerHTML = "";
   const busy = Boolean(state.session?.busy);
   const choice = state.session?.choice;
@@ -1762,6 +1784,7 @@ function renderMessages(messages) {
   for (const m of rows) {
     const el = document.createElement("article");
     el.className = `msg ${m.role}`;
+    if (m.id) el.dataset.mid = m.id;
     const who = document.createElement("div");
     who.className = "who";
     if (m.pending) el.classList.add("pending");
@@ -1811,7 +1834,8 @@ function renderMessages(messages) {
   if (choice && choice.questions && choice.questions.length) {
     log.appendChild(renderChoice(choice));
   }
-  log.scrollTop = log.scrollHeight;
+  if (stick) log.scrollTop = log.scrollHeight;
+  else restoreAnchor(log, anchor, prevTop);
 }
 
 function messageParts(m) {
@@ -1989,7 +2013,6 @@ async function attachSession(id) {
 async function spawnSession(cfg) {
   if (state.spawning) return null;
   state.spawning = true;
-  savePrefs();
   setStatus("");
   $("btn-send").disabled = true;
   try {
@@ -2122,7 +2145,6 @@ async function peekHistory(item) {
 
 async function wakeClosed(peek, text) {
   if (!peek?.native_id && !peek?.cli_session && !peek?.oc_id && !peek?.hm_id) return null;
-  savePrefs();
   setStatus("");
   $("btn-send").disabled = true;
   try {
@@ -2328,7 +2350,7 @@ async function sendMessage(ev) {
     const snap = snapshotUsers(state.session.messages || []);
     state.pending[sid].push({ id: "p-" + Date.now(), text, ...snap });
     persistPending();
-    renderMessages(mergeMessages(state.session.messages || []));
+    renderMessages(mergeMessages(state.session.messages || []), { force: true });
     try {
       await api(`/api/sessions/${sid}/send`, {
         method: "POST",
@@ -2539,7 +2561,7 @@ function openSpotlight() {
   cmdk.i = active >= 0 ? active : 0;
   renderCmdk();
   const m = modSym();
-  $("cmdk-hint").innerHTML = `<span>↑↓ / Ctrl+N/P</span><span>↵ open</span><span>esc close</span><span>⌥J/K sessions</span><span>${m}K search</span><span>${m}. interrupt</span>`;
+  $("cmdk-hint").innerHTML = `<span>↑↓ / Ctrl+N/P</span><span>↵ open</span><span>esc close</span><span>⌥J/K sessions</span><span>${m}K search</span><span>${m}I input</span><span>${m}. interrupt</span>`;
   requestAnimationFrame(() => $("cmdk-input").focus());
 }
 
@@ -2550,6 +2572,32 @@ function closeSpotlight() {
   $("cmdk").hidden = true;
   if (isConsole()) shX?.term?.focus();
   else if (!state.diffOpen && !$("input").disabled) $("input").focus();
+}
+
+function focusComposer() {
+  if (isConsole()) return;
+  if (cmdk.open) {
+    cmdk.open = false;
+    cmdk.pick = null;
+    $("cmdk").hidden = true;
+  }
+  if (state.settings) closeSettings();
+  setFilterOpen(false);
+  closeMenu();
+  if (state.diffOpen) setDiffOpen(false);
+  if ($("composer").hidden) return;
+  const el = $("input");
+  const already = document.activeElement === el;
+  requestAnimationFrame(() => {
+    el.focus();
+    if (already) return;
+    try {
+      const n = el.value.length;
+      el.setSelectionRange(n, n);
+    } catch (_) {
+      /* ignore */
+    }
+  });
 }
 
 function moveCmdk(dir) {
@@ -2761,9 +2809,6 @@ $("diff-session").addEventListener("change", () => {
   }
   loadDiff();
 });
-$("model").addEventListener("change", savePrefs);
-$("effort").addEventListener("change", savePrefs);
-$("fast").addEventListener("change", savePrefs);
 $("btn-new").addEventListener("click", openDraft);
 $("btn-settings").addEventListener("click", () => {
   if (state.settings) closeSettings();
@@ -2888,6 +2933,14 @@ function onGlobalKey(e) {
   if (e.isComposing) return;
   const mod = isModKey(e);
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+
+  if (mod && !e.altKey && !e.shiftKey && key === "i") {
+    if (isConsole()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    focusComposer();
+    return;
+  }
 
   if (cmdk.open) {
     if (mod && !e.altKey && key === "k") {

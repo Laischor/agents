@@ -76,6 +76,8 @@ _lock = threading.RLock()
 SESSIONS: dict[str, dict[str, Any]] = {}
 HIDDEN: set[str] = set()
 PINNED: list[str] = []  # agent:native_id, most recently pinned last
+# agent:native_id -> title, for closed sessions whose native store has none.
+TITLES: dict[str, str] = {}
 _catalog_lock = threading.Lock()
 _catalog_cache: dict[str, Any] = {"at": 0.0, "data": None}
 # A "fresh" catalog still reuses a build this recent, so opening the settings
@@ -597,13 +599,29 @@ def session_choice(sess: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _remember_title(agent: str, native_id: str, title: str) -> None:
+    t = (title or "").strip()
+    if not agent or not native_id or not t or tr.is_wrap_default_title(t):
+        return
+    TITLES[f"{agent}:{native_id}"] = t
+
+
+def saved_title(agent: str, native_id: str) -> str:
+    with _lock:
+        return TITLES.get(f"{agent}:{native_id}", "")
+
+
 def persist_state() -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
+        # Live titles are the truth; absorb them so closing cannot drop them.
+        for sess in SESSIONS.values():
+            _remember_title(str(sess.get("agent") or ""), native_key(sess)[1], str(sess.get("title") or ""))
         payload = {
             "sessions": [s for s in SESSIONS.values() if s.get("agent") != "console"],
             "hidden": sorted(HIDDEN),
             "pinned": list(PINNED),
+            "titles": dict(TITLES),
             "hermes_cwd": hm.cwd_map(),
             "title_fallback": dict(TITLE_FALLBACK),
         }
@@ -624,6 +642,7 @@ def load_state() -> None:
     items = data.get("sessions")
     hidden = data.get("hidden")
     pinned = data.get("pinned")
+    titles = data.get("titles")
     hermes_cwd = data.get("hermes_cwd")
     if isinstance(hermes_cwd, dict):
         hm.load_cwd_map({str(k): str(v) for k, v in hermes_cwd.items() if k and v})
@@ -633,6 +652,13 @@ def load_state() -> None:
     with _lock:
         HIDDEN.clear()
         PINNED.clear()
+        TITLES.clear()
+        if isinstance(titles, dict):
+            for key, val in titles.items():
+                if not isinstance(key, str) or ":" not in key:
+                    continue
+                if isinstance(val, str) and val.strip():
+                    TITLES[key] = val.strip()
         if isinstance(hidden, list):
             for key in hidden:
                 if isinstance(key, str) and ":" in key:
@@ -937,14 +963,58 @@ def _hl_signal(pid: int, sig: signal.Signals) -> None:
             pass
 
 
+def _hl_stop_signal(sid: str) -> signal.Signals:
+    """`opencode run` traps SIGINT as a no-op turn abort; SIGTERM actually stops it."""
+    return signal.SIGTERM if str(sid).startswith("opencode-") else signal.SIGINT
+
+
+def _proc_children(pid: int) -> list[int]:
+    out: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as fh:
+                data = fh.read().decode("utf-8", "replace")
+            # comm may contain spaces/parens, so ppid is the field after the last ")".
+            ppid = int(data[data.rfind(")") + 2 :].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        if ppid == pid:
+            out.append(int(entry))
+    return out
+
+
+def _proc_descendants(pid: int) -> list[int]:
+    acc: list[int] = []
+    stack = [pid]
+    while stack:
+        for child in _proc_children(stack.pop()):
+            acc.append(child)
+            stack.append(child)
+    return acc
+
+
+def _hl_kill_tree(pid: int, sig: signal.Signals) -> None:
+    """Signal a CLI and its descendants: tool commands get their own session."""
+    kids = _proc_descendants(pid)
+    _hl_signal(pid, sig)
+    for child in kids:
+        _hl_signal(child, sig)
+
+
 def hl_interrupt(sid: str, *, kill: bool = False) -> None:
-    """SIGINT ends the -p turn; SIGTERM is for tearing the session down."""
+    """Stop a headless turn. `opencode run` ignores SIGINT, so it needs SIGTERM."""
     pid = _hl_pid(sid)
     if pid is None:
         return
-    _hl_signal(pid, signal.SIGTERM if kill else signal.SIGINT)
+    _hl_kill_tree(pid, signal.SIGTERM if kill else _hl_stop_signal(sid))
     if kill:
-        _hl_signal(pid, signal.SIGKILL)
+        _hl_kill_tree(pid, signal.SIGKILL)
 
 
 def hl_choice(sess: dict[str, Any]) -> dict[str, Any] | None:
@@ -975,7 +1045,7 @@ def _hl_cleanup(sid: str, proc: subprocess.Popen[bytes] | None = None) -> None:
 
 
 def _hl_reap_orphan(sid: str) -> None:
-    """A previous wrap process may have left a -p child; SIGINT it before reuse."""
+    """A previous wrap process may have left a CLI child; stop it before reuse."""
     with _lock:
         if sid in _hl_procs:
             return
@@ -987,7 +1057,7 @@ def _hl_reap_orphan(sid: str) -> None:
             pass
         return
     log(f"hl orphan {sid} pid={pid}, interrupting")
-    _hl_signal(pid, signal.SIGINT)
+    _hl_kill_tree(pid, _hl_stop_signal(sid))
     deadline = time.time() + 5.0
     while time.time() < deadline:
         try:
@@ -996,7 +1066,7 @@ def _hl_reap_orphan(sid: str) -> None:
             break
         time.sleep(0.1)
     else:
-        _hl_signal(pid, signal.SIGTERM)
+        _hl_kill_tree(pid, signal.SIGTERM)
     try:
         hl_proc_file(sid).unlink()
     except OSError:
@@ -2192,6 +2262,7 @@ def _list_history_uncached() -> list[dict[str, Any]]:
     for item in merged:
         key = (str(item.get("agent") or ""), str(item.get("native_id") or ""))
         item["pinned"] = key in pinned
+        _history_title(item)
     merged.sort(key=lambda item: float(item.get("updated") or 0), reverse=True)
     with _lock:
         rank = {key: i for i, key in enumerate(PINNED)}
@@ -2221,6 +2292,16 @@ def _history_blob(item: dict[str, Any]) -> str:
     ).lower()
 
 
+def _history_title(item: dict[str, Any]) -> None:
+    """Fill a titleless history row from wrap's saved map, then the first prompt."""
+    agent = str(item.get("agent") or "")
+    if not item.get("title"):
+        item["title"] = saved_title(agent, str(item.get("native_id") or ""))
+    if not item.get("title") and agent in ("claude", "cursor"):
+        path = Path(item["transcript"]) if item.get("transcript") else None
+        item["title"] = tr.first_prompt_title(agent, path) or ""
+
+
 def _fill_history_title(item: dict[str, Any]) -> None:
     if item.get("title") or str(item.get("agent") or "") in ("opencode", "hermes"):
         return
@@ -2234,6 +2315,7 @@ def _fill_history_title(item: dict[str, Any]) -> None:
     )
     if named:
         item["title"] = named
+    _history_title(item)
 
 
 def search_history(query: str, limit: int = 40) -> list[dict[str, Any]]:
@@ -2401,6 +2483,7 @@ def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
             )
             or ""
         )
+        title = saved_title(agent, native_id) or title or (tr.first_prompt_title(agent, path) or "")
     if title and tr.is_wrap_default_title(title):
         title = ""
     return {
@@ -2659,6 +2742,8 @@ def kill_session(sid: str) -> None:
     if sess.get("agent") == "console":
         ptyio.kill(sid)
     with _lock:
+        # Capture before the pop: the native store has no title for Cursor.
+        _remember_title(str(sess.get("agent") or ""), native_key(sess)[1], str(sess.get("title") or ""))
         SESSIONS.pop(sid, None)
     # Closing a session turns it back into a history entry.
     _turn_state.pop(sid, None)

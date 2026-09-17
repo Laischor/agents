@@ -1003,6 +1003,50 @@ def first_user_title(path: Path, max_len: int = 72) -> str | None:
     return None
 
 
+def _cursor_first_user_title(path: Path, max_len: int = 72, max_lines: int = 500) -> str | None:
+    """First real user query from a Cursor jsonl, clipped to one line."""
+    if not path or not path.is_file():
+        return None
+    try:
+        fh = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for i, line in enumerate(fh, 1):
+            if i > max_lines:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            role = rec.get("role") or (rec.get("message") or {}).get("role")
+            if role != "user":
+                continue
+            msg = rec.get("message") or rec
+            parts = _content_parts(msg.get("content"), as_user=True)
+            if not parts:
+                continue
+            text = " ".join(_parts_text(parts).split())
+            if not text or is_injected_user_message(text) or is_wrap_default_title(text):
+                continue
+            if len(text) > max_len:
+                text = text[: max_len - 1].rstrip() + "…"
+            return text
+    return None
+
+
+def first_prompt_title(agent: str, path: Path | None, max_len: int = 72) -> str | None:
+    """First user query as a tab title, for either native jsonl format."""
+    if not path:
+        return None
+    if agent == "cursor":
+        return _cursor_first_user_title(path, max_len)
+    return first_user_title(path, max_len)
+
+
 def claude_registry_names(claude_home: Path) -> dict[str, dict[str, str]]:
     """sessionId -> {name, nameSource} from ~/.claude/sessions/*.json."""
     out: dict[str, dict[str, str]] = {}
