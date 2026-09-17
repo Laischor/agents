@@ -55,6 +55,10 @@ _ALERT_URGENT_RE = re.compile(
 )
 ALERT_SETTLE_SEC = 6.0
 ALERT_REPLAY_SEC = 45.0
+# How often a long-lived SSE stream writes a comment frame. A client that
+# disconnected only surfaces as a broken pipe when we actually write, so this
+# is what lets a closed tab tear down its thread instead of polling forever.
+STREAM_HEARTBEAT_SEC = 12.0
 BUSY_HOLD_SEC = 2.5
 CLAUDE_MODELS = [
     {"id": "", "label": "CLI default"},
@@ -3130,6 +3134,7 @@ class Handler(BaseHTTPRequestHandler):
         # Every attached stream tracks which turn-end it has already reported, so
         # a transition detected by one tab reaches all of them.
         seen_seq = turn_seq(sid)
+        last_beat = time.time()
         try:
             while True:
                 try:
@@ -3178,6 +3183,13 @@ class Handler(BaseHTTPRequestHandler):
                     # Only the stream that ran the transition invalidates; the
                     # others just refresh off the broadcast.
                     self._sse("turnend", {"sid": sid, **turn_end})
+                # Heartbeat so a vanished client raises BrokenPipeError instead
+                # of leaving this loop (and its thread + socket) alive forever.
+                now = time.time()
+                if now - last_beat >= STREAM_HEARTBEAT_SEC:
+                    last_beat = now
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
                 if sess.get("agent") == "hermes":
                     hm.wait(str(sess.get("hm_id") or ""), timeout=0.35 if busy else 1.2)
                 else:
@@ -3187,6 +3199,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _console_stream(self, sid: str) -> None:
         pos = 0
+        last_beat = time.time()
         try:
             payload = session_public(get_session(sid))
             chunk = f"event: sync\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -3206,6 +3219,11 @@ class Handler(BaseHTTPRequestHandler):
                         SESSIONS.pop(sid, None)
                     ptyio.kill(sid)
                     return
+                now = time.time()
+                if now - last_beat >= STREAM_HEARTBEAT_SEC:
+                    last_beat = now
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
                 ptyio.wait(sid, pos, timeout=0.4)
         except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
             return
