@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 
-const AGENT_LABEL = { claude: "Claude", cursor: "Cursor", opencode: "OpenCode", hermes: "Hermes", console: "Console" };
+const AGENT_LABEL = { claude: "Claude", cursor: "Cursor", opencode: "OpenCode", pi: "Pi", hermes: "Hermes", console: "Console" };
 const FILTER_KEY = "wrap.agentFilter";
 const CWD_KEY = "wrap.cwd";
 const DIFF_SESSION_KEY = "wrap.diffSession";
@@ -790,6 +790,7 @@ function catalogAgents() {
     { id: "claude", label: "Claude" },
     { id: "cursor", label: "Cursor" },
     { id: "opencode", label: "OpenCode" },
+    { id: "pi", label: "Pi" },
   ];
   return agents.filter((a) => a.id && a.id !== "console");
 }
@@ -858,6 +859,7 @@ function titleFallbackState() {
       { id: "claude", label: "Claude" },
       { id: "cursor", label: "Cursor" },
       { id: "opencode", label: "OpenCode" },
+      { id: "pi", label: "Pi" },
     ],
   };
 }
@@ -1019,6 +1021,7 @@ function listedAgents() {
     add("claude", "Claude");
     add("cursor", "Cursor");
     add("opencode", "OpenCode");
+    add("pi", "Pi");
   }
   for (const s of [...(state.sessions || []), ...(state.history || [])]) {
     if (s.agent === "console") continue;
@@ -1118,6 +1121,7 @@ function fillAgents() {
     { id: "claude", label: "Claude" },
     { id: "cursor", label: "Cursor" },
     { id: "opencode", label: "OpenCode" },
+    { id: "pi", label: "Pi" },
   ];
   const current = chatAgent() || el.value;
   el.innerHTML = "";

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from difflib import unified_diff
@@ -13,7 +14,9 @@ USER_QUERY_RE = re.compile(r"<user_query>\s*([\s\S]*?)\s*</user_query>")
 TIMESTAMP_RE = re.compile(r"<timestamp>[\s\S]*?</timestamp>\s*")
 COMMAND_NAME_RE = re.compile(r"<command-name>([^<]+)</command-name>")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
-WRAP_DEFAULT_TITLE_RE = re.compile(r" · (claude|cursor|opencode|hermes)( · |$)", re.I)
+# Pi config dir (`~/.pi/agent` unless PI_CODING_AGENT_DIR overrides it).
+PI_HOME = Path(os.environ.get("PI_CODING_AGENT_DIR") or (Path.home() / ".pi" / "agent"))
+WRAP_DEFAULT_TITLE_RE = re.compile(r" · (claude|cursor|opencode|pi|hermes)( · |$)", re.I)
 # Claude auto names: "{cwd}-{2 hex}" e.g. tsttool-69 (nameSource=derived).
 CLAUDE_DERIVED_TITLE_RE = re.compile(r"^(.+)-[0-9a-fA-F]{2}$")
 HARNESS_USER_TAG_RE = re.compile(
@@ -312,7 +315,7 @@ def touched_paths_jsonl(path: Path | None) -> list[str]:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
-                if not line or '"tool_use"' not in line:
+                if not line or ('"tool_use"' not in line and '"toolCall"' not in line):
                     continue
                 try:
                     rec = json.loads(line)
@@ -323,9 +326,15 @@ def touched_paths_jsonl(path: Path | None) -> list[str]:
                 if not isinstance(content, list):
                     continue
                 for block in content:
-                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    if not isinstance(block, dict):
                         continue
-                    for p in mutate_paths_from_input(str(block.get("name") or ""), block.get("input")):
+                    if block.get("type") == "tool_use":
+                        inp = block.get("input")
+                    elif block.get("type") == "toolCall":
+                        inp = block.get("arguments")
+                    else:
+                        continue
+                    for p in mutate_paths_from_input(str(block.get("name") or ""), inp):
                         _remember_path(seen, out, p)
     except OSError:
         return []
@@ -349,31 +358,42 @@ def diffs_from_tool(name: str, inp: Any) -> list[dict[str, str]]:
         if diff:
             out.append({"path": path, "kind": "write", "diff": diff})
         return out
-    if key in ("edit", "strreplace", "searchreplace"):
-        old = str(inp.get("old_string") or inp.get("oldString") or inp.get("old") or "")
-        new = str(inp.get("new_string") or inp.get("newString") or inp.get("new") or "")
+    if key in ("edit", "strreplace", "searchreplace", "multiedit"):
+        edits = inp.get("edits") or inp.get("replacements") or []
+        if isinstance(edits, list) and edits:
+            for item in edits:
+                if not isinstance(item, dict):
+                    continue
+                old = _replace_old(item)
+                new = _replace_new(item)
+                if old == new:
+                    continue
+                diff = unified_replace(path, old, new)
+                if diff:
+                    out.append({"path": path, "kind": "edit", "diff": diff})
+            return out
+        old = _replace_old(inp)
+        new = _replace_new(inp)
         if old == new:
             return out
         diff = unified_replace(path, old, new)
         if diff:
             out.append({"path": path, "kind": "edit", "diff": diff})
         return out
-    if key == "multiedit":
-        edits = inp.get("edits") or inp.get("replacements") or []
-        if not isinstance(edits, list):
-            return out
-        for item in edits:
-            if not isinstance(item, dict):
-                continue
-            old = str(item.get("old_string") or item.get("oldString") or "")
-            new = str(item.get("new_string") or item.get("newString") or "")
-            if old == new:
-                continue
-            diff = unified_replace(path, old, new)
-            if diff:
-                out.append({"path": path, "kind": "edit", "diff": diff})
-        return out
     return out
+
+
+def _replace_old(inp: dict[str, Any]) -> str:
+    """Old text across Claude/Cursor (`old_string`) and Pi (`oldText`) edits."""
+    return str(
+        inp.get("old_string") or inp.get("oldString") or inp.get("oldText") or inp.get("old") or ""
+    )
+
+
+def _replace_new(inp: dict[str, Any]) -> str:
+    return str(
+        inp.get("new_string") or inp.get("newString") or inp.get("newText") or inp.get("new") or ""
+    )
 
 
 def _content_parts(content: Any, *, as_user: bool = False) -> list[dict[str, Any]] | None:
@@ -618,9 +638,112 @@ def parse_cursor_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
     return merge_turns(out)[-limit:]
 
 
+def _pi_content_parts(content: Any) -> list[dict[str, Any]]:
+    """Ordered text / diff / tool parts from a Pi message content array."""
+    if isinstance(content, str):
+        t = content.strip()
+        return [{"type": "text", "text": t}] if t else []
+    if not isinstance(content, list):
+        return []
+    parts: list[dict[str, Any]] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            t = (block.get("text") or "").strip()
+            if t:
+                parts.append({"type": "text", "text": t})
+        elif kind == "toolCall":
+            name = str(block.get("name") or "tool")
+            args = block.get("arguments")
+            hunks = diffs_from_tool(name, args)
+            if hunks:
+                for h in hunks:
+                    parts.append({"type": "diff", **h})
+            else:
+                item: dict[str, Any] = {"type": "tool", "name": name}
+                hint = tool_hint(name, args)
+                if hint:
+                    item["detail"] = hint
+                parts.append(item)
+        # thinking / image blocks are not rendered
+    return parts
+
+
+def _pi_chain(records: list[tuple[int, dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Active branch (leaf -> root) of Pi's tree session, in file order."""
+    by_id: dict[str, tuple[int, dict[str, Any]]] = {}
+    last_id = ""
+    for idx, rec in records:
+        rid = rec.get("id")
+        if isinstance(rid, str) and rid:
+            by_id[rid] = (idx, rec)
+            last_id = rid
+    if not last_id:
+        return [rec for _, rec in records]
+    chain: list[tuple[int, dict[str, Any]]] = []
+    seen: set[str] = set()
+    cur = last_id
+    while cur and cur not in seen:
+        seen.add(cur)
+        entry = by_id.get(cur)
+        if not entry:
+            break
+        chain.append(entry)
+        cur = str(entry[1].get("parentId") or "")
+    chain.sort(key=lambda item: item[0])
+    return [rec for _, rec in chain]
+
+
+def parse_pi_jsonl(path: Path, limit: int = 300) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if not path.is_file():
+        return out
+    records: list[tuple[int, dict[str, Any]]] = []
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for i, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict):
+                records.append((i, rec))
+    for rec in _pi_chain(records):
+        if rec.get("type") != "message":
+            continue
+        msg = rec.get("message") or {}
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        parts = _pi_content_parts(msg.get("content"))
+        if not parts:
+            continue
+        text = _parts_text(parts)
+        if role == "user" and is_injected_user_message(text):
+            continue
+        out.append(
+            {
+                "id": rec.get("id") or f"L{rec.get('timestamp') or ''}",
+                "role": role,
+                "text": text,
+                "parts": parts,
+                "ts": rec.get("timestamp") or "",
+            }
+        )
+    return merge_turns(out)[-limit:]
+
+
 def parse_jsonl(agent: str, path: Path, limit: int = 300) -> list[dict[str, Any]]:
     if agent == "cursor":
         return parse_cursor_jsonl(path, limit)
+    if agent == "pi":
+        return parse_pi_jsonl(path, limit)
     return parse_claude_jsonl(path, limit)
 
 
@@ -869,6 +992,18 @@ def cursor_project_dir(cwd: Path, cursor_home: Path) -> Path:
     return cursor_home / "projects" / encoded / "agent-transcripts"
 
 
+def pi_project_dir(cwd: Path) -> Path:
+    # Pi: `~/.pi/agent/sessions/--<cwd with / -> ->--`.
+    encoded = "--" + str(cwd).lstrip("/").replace("/", "-") + "--"
+    return PI_HOME / "sessions" / encoded
+
+
+def pi_session_id(path: Path) -> str:
+    """Pi files are `<timestamp>_<uuid>.jsonl`; the native id is the uuid."""
+    stem = path.stem
+    return stem.split("_", 1)[1] if "_" in stem else stem
+
+
 def list_transcripts(agent: str, cwd: Path, claude_home: Path, cursor_home: Path) -> list[Path]:
     if agent == "claude":
         root = claude_project_dir(cwd, claude_home)
@@ -880,6 +1015,11 @@ def list_transcripts(agent: str, cwd: Path, claude_home: Path, cursor_home: Path
         if not root.is_dir():
             return []
         return sorted(p for p in root.glob("*/*.jsonl") if p.is_file())
+    if agent == "pi":
+        root = pi_project_dir(cwd)
+        if not root.is_dir():
+            return []
+        return sorted(p for p in root.glob("*.jsonl") if p.is_file())
     return []
 
 
@@ -1038,12 +1178,48 @@ def _cursor_first_user_title(path: Path, max_len: int = 72, max_lines: int = 500
     return None
 
 
+def _pi_first_user_title(path: Path, max_len: int = 72, max_lines: int = 500) -> str | None:
+    """First real user prompt from a Pi session jsonl, clipped to one line."""
+    if not path or not path.is_file():
+        return None
+    try:
+        fh = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for i, line in enumerate(fh, 1):
+            if i > max_lines:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("type") != "message":
+                continue
+            msg = rec.get("message") or {}
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            parts = _pi_content_parts(msg.get("content"))
+            text = " ".join(_parts_text(parts).split())
+            if not text or is_injected_user_message(text) or is_wrap_default_title(text):
+                continue
+            if len(text) > max_len:
+                text = text[: max_len - 1].rstrip() + "…"
+            return text
+    return None
+
+
 def first_prompt_title(agent: str, path: Path | None, max_len: int = 72) -> str | None:
-    """First user query as a tab title, for either native jsonl format."""
+    """First user query as a tab title, for any native jsonl format."""
     if not path:
         return None
     if agent == "cursor":
         return _cursor_first_user_title(path, max_len)
+    if agent == "pi":
+        return _pi_first_user_title(path, max_len)
     return first_user_title(path, max_len)
 
 
@@ -1089,6 +1265,30 @@ def cursor_session_title(cursor_home: Path, transcript: Path) -> str | None:
     return None
 
 
+def pi_session_title(path: Path | None) -> str | None:
+    """Pi's `/name` / `--name` display name from the latest session_info entry."""
+    if not path or not path.is_file():
+        return None
+    last: str | None = None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"session_info"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict) or rec.get("type") != "session_info":
+                    continue
+                name = str(rec.get("name") or "").strip()
+                if name:
+                    last = name
+    except OSError:
+        return None
+    return last
+
+
 def native_session_title(
     agent: str,
     *,
@@ -1103,6 +1303,9 @@ def native_session_title(
         if not transcript:
             return None
         title = cursor_session_title(cursor_home, transcript)
+        return None if title and is_wrap_default_title(title) else title
+    if agent == "pi":
+        title = pi_session_title(transcript)
         return None if title and is_wrap_default_title(title) else title
     if agent != "claude":
         return None
@@ -1217,7 +1420,7 @@ def list_native_history(
     for cwd in projects:
         if not cwd.is_dir():
             continue
-        for agent in ("claude", "cursor"):
+        for agent in ("claude", "cursor", "pi"):
             for path in list_transcripts(agent, cwd, claude_home, cursor_home):
                 try:
                     st = path.stat()
@@ -1225,7 +1428,12 @@ def list_native_history(
                     continue
                 if st.st_size < 8:
                     continue
-                native = path.stem if agent == "claude" else path.parent.name
+                if agent == "claude":
+                    native = path.stem
+                elif agent == "pi":
+                    native = pi_session_id(path)
+                else:
+                    native = path.parent.name
                 add(
                     st.st_mtime,
                     {
@@ -1247,7 +1455,7 @@ def list_native_history(
             named = native_session_title(
                 str(item["agent"]),
                 transcript=path,
-                cli_session=str(item["native_id"] or "") if item["agent"] == "claude" else "",
+                cli_session=str(item["native_id"] or "") if item["agent"] in ("claude", "pi") else "",
                 claude_home=claude_home,
                 cursor_home=cursor_home,
                 registry=registry,

@@ -13,7 +13,7 @@ from typing import Any
 import transcripts as tr
 
 _TITLE_RE = re.compile(r"^[\s\"'`“”‘’]+|[\s\"'`“”‘’]+$")
-_FALLBACK_AGENTS = ("claude", "cursor", "opencode")
+_FALLBACK_AGENTS = ("claude", "cursor", "opencode", "pi")
 _PROMPT = (
     "Name this coding session in 3 to 8 words. Same language as the user. "
     "No quotes, no trailing punctuation, no project-folder slug. "
@@ -65,6 +65,8 @@ def generate(text: str, *, agent: str = "claude", model: str = "") -> str | None
         raw = _run_claude(prompt, model.strip() or model())
     elif agent == "cursor":
         raw = _run_cursor(prompt, model.strip())
+    elif agent == "pi":
+        raw = _run_pi(prompt, model.strip())
     else:
         raw = _run_opencode(prompt, model.strip())
     return clean(raw or "")
@@ -155,6 +157,16 @@ def _run_cursor(prompt: str, model_id: str) -> str:
         args.extend(["--model", model_id])
     args.append(prompt)
     raw = _run(args)
+    return raw.splitlines()[0].strip() if raw else ""
+
+
+def _run_pi(prompt: str, model_id: str) -> str:
+    binary = which("pi") or "pi"
+    args = [binary, "-p", "--no-session", "--approve"]
+    if model_id:
+        args.extend(["--model", model_id])
+    args.append(prompt)
+    raw = _run(args, timeout=45.0)
     return raw.splitlines()[0].strip() if raw else ""
 
 

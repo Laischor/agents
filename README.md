@@ -81,6 +81,7 @@ The launcher starts the container if needed and sets the working directory 1:1 t
 |---|---|---|
 | Claude Code | `claude -p` + `~/.claude/projects/…/*.jsonl` | none |
 | Cursor CLI | `agent -p` + `~/.cursor/projects/…/agent-transcripts/` | none |
+| Pi | `pi --mode json -p --session-id` + `~/.pi/agent/sessions/…/*.jsonl` | none |
 | OpenCode | `opencode serve` HTTP API (same backend as the TUI) | none |
 | Hermes | Gateway API on `:8642` (only when `HERMES=1`) | none |
 
@@ -94,6 +95,13 @@ agents wrap                 # print URL if already up
 ```
 
 Permission prompts show **Yes** / **No** in the chat when they appear. **Stop** ends that wrap session (and the console PTY). OpenCode and Hermes sessions stay in their own history (Stop does not delete them).
+
+**Tests** (stdlib `unittest`, no pytest, no network, no CLIs):
+
+```bash
+./wrap/tests/run.sh              # 56 tests: JSONL parsers, diffs, titles, catalog, transcript binding
+python3 -m unittest discover -s wrap/tests -t wrap -v
+```
 
 Set `AGENTS_WRAP_SERVE=0` in `.env` to skip auto-start. Recreate `agents` from the **host** after this change (`./start.sh`) so the image has the port mapping.
 

@@ -41,11 +41,12 @@ CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claud
 CURSOR_HOME = Path.home() / ".cursor"
 STATIC = ROOT / "static"
 STATE_PATH = Path(os.environ.get("WRAP_STATE", "/var/lib/wrap/state.json"))
-AGENTS = ("claude", "cursor", "opencode", "hermes", "console")
+AGENTS = ("claude", "cursor", "opencode", "pi", "hermes", "console")
 AGENT_LABELS = {
     "claude": "Claude",
     "cursor": "Cursor",
     "opencode": "OpenCode",
+    "pi": "Pi",
     "hermes": "Hermes",
     "console": "Console",
 }
@@ -228,7 +229,7 @@ def http_live(sess: dict[str, Any]) -> bool:
         return True
     if agent == "hermes":
         return bool(sess.get("hm_id"))
-    if agent in ("claude", "cursor"):
+    if agent in ("claude", "cursor", "pi"):
         return bool(sess.get("cli_session"))
     if agent == "console":
         return ptyio.alive(str(sess.get("id") or ""))
@@ -562,7 +563,7 @@ def session_is_working(sess: dict[str, Any], *, hold: bool = True) -> bool:
     busy = False
     if sid and sid in _sending:
         busy = True
-    if sess.get("agent") in ("claude", "cursor", "opencode"):
+    if sess.get("agent") in ("claude", "cursor", "opencode", "pi"):
         busy = busy or hl_running(sid) or bool(hl_choice(sess))
     elif sess.get("agent") == "hermes" and sess.get("hm_id"):
         busy = busy or hm.session_busy(str(sess["hm_id"]))
@@ -753,9 +754,10 @@ def apply_native_title(
         return True
     if sess.get("title_source") in ("llm", "user"):
         return False
-    if str(sess.get("agent") or "") == "claude":
+    if str(sess.get("agent") or "") in ("claude", "pi"):
+        agent = str(sess.get("agent") or "")
         path = sess.get("transcript")
-        first = tr.first_user_title(Path(path)) if path else None
+        first = tr.first_prompt_title(agent, Path(path)) if path else None
         cur = str(sess.get("title") or "")
         placeholder = (
             not cur
@@ -768,7 +770,7 @@ def apply_native_title(
             if persist:
                 persist_state()
             return True
-        if tr.is_claude_derived_title(cur, sess.get("cwd")):
+        if agent == "claude" and tr.is_claude_derived_title(cur, sess.get("cwd")):
             restored = ""
             if path:
                 restored = tr.last_jsonl_custom_title(Path(path)) or ""
@@ -791,7 +793,7 @@ def apply_native_title(
 def _normalize_title_fallback(raw: dict[str, Any] | None) -> dict[str, str]:
     data = raw if isinstance(raw, dict) else {}
     agent = str(data.get("agent") or "").strip()
-    if agent not in ("", "claude", "cursor", "opencode"):
+    if agent not in ("", "claude", "cursor", "opencode", "pi"):
         agent = ""
     model = str(data.get("model") or "").strip()[:120]
     if not agent:
@@ -930,8 +932,9 @@ def hl_cli_session(sess: dict[str, Any]) -> str:
         return cid
     path = Path(sess.get("transcript") or "")
     if path.is_file():
-        sess["cli_session"] = path.stem
-        return path.stem
+        stem = tr.pi_session_id(path) if sess.get("agent") == "pi" else path.stem
+        sess["cli_session"] = stem
+        return stem
     sess["cli_session"] = str(uuid.uuid4())
     return sess["cli_session"]
 
@@ -1566,6 +1569,54 @@ def cursor_prompt(sess: dict[str, Any], text: str) -> None:
         maybe_title_session(sess)
 
 
+def pi_prompt(sess: dict[str, Any], text: str) -> None:
+    """One headless `pi -p --mode json` turn. `--session-id` resumes or creates."""
+    sid = str(sess["id"])
+    cwd = Path(sess["cwd"])
+    cid = hl_cli_session(sess)
+    binary = shutil_which("pi") or "pi"
+    args = [
+        binary,
+        "--mode",
+        "json",
+        "-p",
+        "--approve",
+        "--session-id",
+        cid,
+    ]
+    model = str(sess.get("model") or "").strip()
+    if model:
+        args.extend(["--model", model])
+    effort = str(sess.get("effort") or "").strip()
+    if effort:
+        args.extend(["--thinking", effort])
+    prompt = (text or "").strip()
+    if prompt.startswith("-"):
+        args.extend(["--", prompt])
+    else:
+        args.append(prompt)
+    # Print mode merges piped stdin into the prompt; an open PIPE would block.
+    proc = _hl_spawn(sid, args, cwd, _hl_env(sid), stdin=subprocess.DEVNULL)
+    try:
+        if proc.stdout is not None:
+            for _raw in proc.stdout:
+                pass
+        proc.wait()
+        if proc.returncode not in (0, -signal.SIGINT, -signal.SIGTERM, 130, 143):
+            log(f"pi {sid}: exit {proc.returncode}")
+    finally:
+        if proc.poll() is None:
+            hl_interrupt(sid)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                hl_interrupt(sid, kill=True)
+                proc.wait(timeout=2)
+        _hl_cleanup(sid, proc)
+        ensure_transcript(sess)
+        maybe_title_session(sess)
+
+
 def oc_prompt(sess: dict[str, Any], text: str) -> None:
     """One `opencode run --format json --auto` turn."""
     sid = str(sess["id"])
@@ -1733,7 +1784,7 @@ def _drain_sends(sid: str) -> None:
                 if sess["agent"] == "hermes":
                     hermes_send_text(sess, text)
                     continue
-                if sess["agent"] in ("claude", "cursor", "opencode"):
+                if sess["agent"] in ("claude", "cursor", "opencode", "pi"):
                     with _lock:
                         _sending.add(sid)
                     try:
@@ -1742,6 +1793,9 @@ def _drain_sends(sid: str) -> None:
                         elif sess["agent"] == "cursor":
                             ensure_transcript(sess)
                             cursor_prompt(sess, text)
+                        elif sess["agent"] == "pi":
+                            ensure_transcript(sess)
+                            pi_prompt(sess, text)
                         else:
                             ensure_transcript(sess)
                             claude_prompt(sess, text)
@@ -1799,7 +1853,7 @@ def pick_transcript(sess: dict[str, Any]) -> Path | None:
             if cli_sid in p.name or cli_sid in p.parent.name:
                 if str(p) not in claimed and p.is_file():
                     return p
-    if agent in ("claude", "cursor"):
+    if agent in ("claude", "cursor", "pi"):
         # Headless transcripts are bound by cli_session; mtime would steal siblings.
         return None
     candidates: list[tuple[float, Path]] = []
@@ -1867,6 +1921,36 @@ def parse_labeled_models(lines: list[str]) -> list[dict[str, str]]:
     return out
 
 
+def _model_slug(text: str) -> bool:
+    """Table columns are slugs; prose lines (`No models available.`) are not."""
+    return bool(text) and all(c.isalnum() or c in "_-." for c in text) and text[0].isalnum()
+
+
+def pi_models() -> list[dict[str, str]]:
+    """`pi --list-models` prints a `provider model context max-out ...` table.
+
+    With no provider logged in it prints `No models available. Use /login ...`
+    instead of a table — never turn that prose into a fake provider/model.
+    """
+    out: list[dict[str, str]] = [{"id": "", "label": "CLI default"}]
+    seen: set[str] = set()
+    for ln in run_lines(["pi", "--list-models"], timeout=30.0):
+        cols = ln.split()
+        if len(cols) < 2 or cols[0].lower() == "provider":
+            continue
+        if "available" in ln.lower() or ln.lstrip().startswith(("Use ", "See")):
+            continue
+        provider, model = cols[0], cols[1]
+        if not _model_slug(provider) or not _model_slug(model):
+            continue
+        mid = f"{provider}/{model}"
+        if mid in seen:
+            continue
+        seen.add(mid)
+        out.append({"id": mid, "label": f"{model} · {provider}"})
+    return out
+
+
 def catalog(*, fresh: bool = False) -> dict[str, Any]:
     """Model catalog. Cached 120 s; `fresh` bypasses it but stays debounced.
 
@@ -1886,6 +1970,11 @@ def catalog(*, fresh: bool = False) -> dict[str, Any]:
 
     cursor_models = [{"id": "", "label": "CLI default"}]
     cursor_models.extend(parse_labeled_models(run_lines(["agent", "models"])))
+    try:
+        pi_model_list = pi_models()
+    except Exception as exc:  # noqa: BLE001
+        log(f"pi models: {exc}")
+        pi_model_list = [{"id": "", "label": "CLI default"}]
     oc_models = oc.providers(HOST_PROJECTS if HOST_PROJECTS.is_dir() else None)
     oc_stale = False
     if len(oc_models) <= 1:
@@ -1931,6 +2020,20 @@ def catalog(*, fresh: bool = False) -> dict[str, Any]:
             ],
             "fast": False,
         },
+        "pi": {
+            "models": pi_model_list,
+            "effort": [
+                {"id": "", "label": "Default"},
+                {"id": "off", "label": "Off"},
+                {"id": "minimal", "label": "Minimal"},
+                {"id": "low", "label": "Low"},
+                {"id": "medium", "label": "Medium"},
+                {"id": "high", "label": "High"},
+                {"id": "xhigh", "label": "Extra high"},
+                {"id": "max", "label": "Max"},
+            ],
+            "fast": False,
+        },
     }
     if hermes_on():
         data["hermes"] = {
@@ -1953,6 +2056,7 @@ def _catalog_with_title(data: dict[str, Any]) -> dict[str, Any]:
             {"id": "claude", "label": "Claude"},
             {"id": "cursor", "label": "Cursor"},
             {"id": "opencode", "label": "OpenCode"},
+            {"id": "pi", "label": "Pi"},
         ],
     }
     return out
@@ -2101,7 +2205,12 @@ def native_key(sess: dict[str, Any]) -> tuple[str, str]:
         path = str(sess.get("transcript") or "")
         if path:
             p = Path(path)
-            native = p.stem if agent == "claude" else p.parent.name
+            if agent == "pi":
+                native = tr.pi_session_id(p)
+            elif agent == "claude":
+                native = p.stem
+            else:
+                native = p.parent.name
     return agent, native
 
 
@@ -2123,7 +2232,7 @@ def find_live_native(agent: str, native_id: str, cwd: Path) -> dict[str, Any] | 
             return sess
         if agent == "hermes" and sess.get("hm_id"):
             return sess
-        if agent in ("claude", "cursor") and sess.get("cli_session"):
+        if agent in ("claude", "cursor", "pi") and sess.get("cli_session"):
             return sess
     return None
 
@@ -2301,7 +2410,7 @@ def _history_title(item: dict[str, Any]) -> None:
     agent = str(item.get("agent") or "")
     if not item.get("title"):
         item["title"] = saved_title(agent, str(item.get("native_id") or ""))
-    if not item.get("title") and agent in ("claude", "cursor"):
+    if not item.get("title") and agent in ("claude", "cursor", "pi"):
         path = Path(item["transcript"]) if item.get("transcript") else None
         item["title"] = tr.first_prompt_title(agent, path) or ""
 
@@ -2313,7 +2422,7 @@ def _fill_history_title(item: dict[str, Any]) -> None:
     named = tr.native_session_title(
         str(item.get("agent") or ""),
         transcript=path,
-        cli_session=str(item.get("native_id") or "") if item.get("agent") == "claude" else "",
+        cli_session=str(item.get("native_id") or "") if item.get("agent") in ("claude", "pi") else "",
         claude_home=CLAUDE_HOME,
         cursor_home=CURSOR_HOME,
     )
@@ -2404,6 +2513,8 @@ def history_transcript(agent: str, cwd: Path, native_id: str) -> Path | None:
     for path in tr.list_transcripts(agent, cwd, CLAUDE_HOME, CURSOR_HOME):
         if agent == "claude" and path.stem == native_id:
             return path
+        if agent == "pi" and tr.pi_session_id(path) == native_id:
+            return path
         if agent == "cursor" and path.parent.name == native_id:
             return path
     return None
@@ -2481,7 +2592,7 @@ def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
             tr.native_session_title(
                 agent,
                 transcript=path,
-                cli_session=native_id if agent == "claude" else "",
+                cli_session=native_id if agent in ("claude", "pi") else "",
                 claude_home=CLAUDE_HOME,
                 cursor_home=CURSOR_HOME,
             )
@@ -2502,7 +2613,7 @@ def history_public(agent: str, native_id: str, cwd: Path) -> dict[str, Any]:
         "effort": "",
         "fast": False,
         "created": "",
-        "cli_session": native_id if agent in ("claude", "cursor") else "",
+        "cli_session": native_id if agent in ("claude", "cursor", "pi") else "",
         "native_id": native_id,
         "busy": False,
         "subagents": [],
@@ -2676,6 +2787,37 @@ def open_session(
         bump_history_gen()
         return sess
 
+    if agent == "pi":
+        cli_session = resume_id if resume_id else str(uuid.uuid4())
+        transcript = None
+        if resume_id:
+            path = history_transcript("pi", cwd, resume_id)
+            if path:
+                transcript = str(path)
+        sess = {
+            "id": sid,
+            "agent": "pi",
+            "cwd": str(cwd),
+            "oc_id": None,
+            "hm_id": None,
+            "transcript": transcript,
+            "seen_transcripts": snapshot_transcripts(agent, cwd),
+            "title": title,
+            "model": model,
+            "effort": effort,
+            "fast": False,
+            "created": created,
+            "cli_session": cli_session,
+            "title_source": "user" if user_title else "wrap",
+        }
+        with _lock:
+            SESSIONS[sid] = sess
+        persist_state()
+        if prompt:
+            enqueue_send(sid, prompt)
+        bump_history_gen()
+        return sess
+
     raise RuntimeError(f"unknown agent: {agent}")
 
 
@@ -2735,7 +2877,7 @@ def kill_session(sid: str) -> None:
             hm.abort(str(sess["hm_id"]))
         except RuntimeError:
             pass
-    if sess.get("agent") in ("claude", "cursor", "opencode"):
+    if sess.get("agent") in ("claude", "cursor", "opencode", "pi"):
         hl_interrupt(sid, kill=True)
         with _lock:
             _hl_choices.pop(sid, None)
@@ -2811,6 +2953,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "opencode": shutil_which("opencode") is not None,
                     "opencode_serve": False,
+                    "pi": shutil_which("pi") is not None,
                     "hermes": hermes_on() and hm.health(),
                     "hermes_enabled": hermes_on(),
                     "host_projects": str(HOST_PROJECTS),
@@ -2978,7 +3121,7 @@ class Handler(BaseHTTPRequestHandler):
                 sess = get_session(m.group(1))
                 if sess["agent"] == "hermes" and sess.get("hm_id"):
                     hm.abort(str(sess["hm_id"]))
-                elif sess["agent"] in ("claude", "cursor", "opencode"):
+                elif sess["agent"] in ("claude", "cursor", "opencode", "pi"):
                     hl_interrupt(m.group(1))
                 else:
                     raise RuntimeError("nothing to interrupt")
@@ -3061,7 +3204,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise RuntimeError("no hermes session")
         elif sess["agent"] == "console":
             raise RuntimeError("console has no chat")
-        elif sess["agent"] not in ("claude", "cursor", "opencode"):
+        elif sess["agent"] not in ("claude", "cursor", "opencode", "pi"):
             raise RuntimeError("unknown agent")
         enqueue_send(sid, text)
         st, raw, ct = json_bytes({"ok": True, "queued": True})
