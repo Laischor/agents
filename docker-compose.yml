@@ -123,6 +123,15 @@ services:
     image: agents:local
     container_name: agents
     working_dir: ${HOST_PROJECTS}
+    # Tailscale MagicDNS stub first so *.ts.net names resolve in-container.
+    # Docker's embedded resolver (127.0.0.11) falls over to the second entry when
+    # the stub SERVFAILs a public name, but only if that entry answers: a dead
+    # resolver (LAN router, e.g. 192.168.0.1) makes every lookup time out while
+    # raw IP egress keeps working. start.sh probes the candidates from a
+    # throwaway container and only writes a reachable one to .env.
+    dns:
+      - 100.100.100.100
+      - ${AGENTS_DNS_DHCP:-1.1.1.1}
     stdin_open: true
     tty: true
     # tini as PID 1 — reap zombies from dead MCP/agent children

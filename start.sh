@@ -196,6 +196,75 @@ ensure_host_home() {
   log "HOST_HOME in .env geschrieben ($HOST_HOME)."
 }
 
+# Container DNS: compose pins the Tailscale MagicDNS stub (100.100.100.100) for
+# *.ts.net; it SERVFAILs public names, so Docker's embedded resolver (127.0.0.11)
+# needs a second upstream that really answers. The DHCP resolver of the host is a
+# bad guess: the LAN router (e.g. 192.168.0.1) normally does not answer DNS from
+# the bridge network, and 127.0.0.11 then waits on it until every lookup times out
+# — the container appears to have no internet while raw IP egress still works.
+# Candidates are collected from the host (scutil first, then DHCP, then public
+# resolvers) and probed from a throwaway container; only a resolver that answers
+# is written to .env. Re-run start.sh after a network switch.
+dns_candidates() {
+  local dev
+  {
+    scutil --dns 2>/dev/null | awk '/nameserver\[[0-9]+\]/{print $3}'
+    for dev in $(networksetup -listallhardwareports 2>/dev/null | awk '/Device:/{print $2}'); do
+      ipconfig getoption "$dev" domain_name_server 2>/dev/null || true
+    done
+    printf '1.1.1.1\n8.8.8.8\n'
+  } | tr ' ' '\n' \
+    | awk -v stub=100.100.100.100 'NF && $1 != stub && $1 !~ /^127\./ && !seen[$1]++'
+}
+
+# Same path as the real container: --dns hands the server to 127.0.0.11, which
+# only fails over when the upstream answers, so a dead resolver fails the probe.
+dns_probe() {
+  local server="$1" net=()
+  [[ -n "$server" ]] || return 1
+  docker image inspect agents:local >/dev/null 2>&1 || return 1
+  if docker network inspect agents_default >/dev/null 2>&1; then
+    net=(--network agents_default)
+  fi
+  docker run --rm "${net[@]}" --dns "$server" --entrypoint sh agents:local \
+    -c 'timeout 4 getent hosts example.com >/dev/null 2>&1' >/dev/null 2>&1
+}
+
+ensure_agents_dns_dhcp() {
+  load_env
+  local server="" cand tmp envf="$AGENTS_DIR/.env"
+  while IFS= read -r cand; do
+    if dns_probe "$cand"; then
+      server="$cand"
+      break
+    fi
+  done < <(dns_candidates)
+
+  if [[ -z "$server" ]]; then
+    AGENTS_DNS_DHCP="${AGENTS_DNS_DHCP:-1.1.1.1}"
+    export AGENTS_DNS_DHCP
+    log "DNS-Fallback: kein Kandidat antwortet aus dem Container — behalte ${AGENTS_DNS_DHCP}."
+    return 0
+  fi
+
+  if [[ "${AGENTS_DNS_DHCP:-}" != "$server" ]]; then
+    if grep -q '^AGENTS_DNS_DHCP=' "$envf" 2>/dev/null; then
+      tmp="$(mktemp)"
+      sed "s|^AGENTS_DNS_DHCP=.*|AGENTS_DNS_DHCP=$server|" "$envf" >"$tmp"
+      mv "$tmp" "$envf"
+    else
+      {
+        printf '\n'
+        printf '# Aus dem Container erreichbarer Resolver als DNS-Fallback — start.sh\n'
+        printf 'AGENTS_DNS_DHCP=%s\n' "$server"
+      } >> "$envf"
+    fi
+    log "DNS-Fallback aus Container-Probe: $server (in .env aktualisiert)."
+  fi
+  AGENTS_DNS_DHCP="$server"
+  export AGENTS_DNS_DHCP
+}
+
 # macOS Keychain holds the gh OAuth token; ~/.config/gh has no oauth_token.
 # Export GH_TOKEN so compose can inject it into the Linux container.
 # gh is optional — missing binary is silent; only warn when installed but logged out.
@@ -333,6 +402,7 @@ start_agents() {
   load_env
   ensure_data_dirs
   ensure_host_home
+  ensure_agents_dns_dhcp
   ensure_gh_token
   ensure_hermes_dashboard_auth
   ensure_hermes_uid
