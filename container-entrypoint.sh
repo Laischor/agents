@@ -23,22 +23,6 @@ ensure_git_identity() {
   fi
 }
 
-# ~/.pi is mounted from the host, so Pi packages must be registered after the
-# volume is available rather than while the image is being built.
-ensure_pi_package() {
-  local match="$1"
-  local source="$2"
-
-  if pi list 2>/dev/null | grep -Fq "$match"; then
-    return
-  fi
-
-  printf 'Installing Pi package: %s\n' "$source"
-  if ! pi install "$source"; then
-    printf 'warning: could not install Pi package %s\n' "$source" >&2
-  fi
-}
-
 # Claude configs live under CLAUDE_CONFIG_DIR (/root/.claude, host-mounted).
 # Plugin install alone is not enough: must be enabled, and statusline helps
 # confirm activation. Do not also wire SessionStart into settings.json — that
@@ -268,9 +252,6 @@ ensure_wrap_serve() {
 }
 
 ensure_git_identity
-
-ensure_pi_package "v2nic/pi-caveman" \
-  "git:github.com/v2nic/pi-caveman@2480692ffabddc3d1efec8eb822e664ff7e0e5ef"
 
 ensure_claude_caveman
 ensure_claude_cmux_hooks
